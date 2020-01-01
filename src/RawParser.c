@@ -1,10 +1,26 @@
 /* RawParser -- A 'raw' parser         Copyright (C) 2019 Frans Faase
 
-   This shows how to implement a parser and scanner in a number of
-   incremental steps going from simple to complex. This also presents
-   a method for intergrating a scanner with a parser using a single
-   parsing algorithm using a unified grammar description. Function
-   pointers are used to define actions to be taken at the grammar.
+   This shows how to implement a grammar driven, scannerless parser in C
+   in a number of incremental steps going from simple to complex.
+
+   Grammar driven means that this is not a compiler that reads a grammar
+   and either generates code (implementing the parser) or a set of tables
+   to drive a parsing algorithm. (An example of the latter is yacc/bison.)
+   Instead the parsing algorithm directly operates on the grammar
+   specification, which allows to implement a rich grammar with optional,
+   sequential and grouping, of grammar elements. This specification is
+   represented by structs that point to each other. The construction of
+   the grammar is aided by some clever defines to increase readability.
+
+   It being scannerless means that the parser operates on a single unified
+   grammar description for both the scanning and parsing aspects. In this
+   grammar description, function pointers are used to define actions to
+   be taken during parsing to construct the resuling abstract syntax tree.
+   
+   The code has been structured to make it more accessible. For this
+   purpose narrative comments have been added and examples of usage are
+   given.
+   
    
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -23,20 +39,6 @@
 GNU General Public License:
    http://www.iwriteiam.nl/GNU.txt
 
-Description:
-   This program implements a 'raw' parser where you have to implement
-   everything else. It features:
-   - Implements a "greedy" back-tracking parser, thus
-	 supporting a wide range of grammers. Can deal with many
-	 ambigious grammers.
-   - Uses memorization for high performance.
-   - Grammar supports keywords like OPT, LIST, SEQ and CHAIN.
-   - Has no scanner.
-   - Fully programmable actions at any stage of the parsing.
-   - extremely small code base. (This file contains it all.)
-
-   This parser was developed as part of the Meta-Meta environment. 
-   See http://www.iwriteiam.nl/MM.html
 */
 
 #define VERSION "0.1 of December 2019."
@@ -72,7 +74,7 @@ typedef unsigned char byte;
 	Internal representation parsing rules
 	~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 	
-	The following section of the code deals with internal representation of
+	The following section of the code deals with the internal representation of
 	the parsing rules as they are used by the parsing routines.
 	
 	The grammar is an extended BNF grammar, which supports optional elements,
@@ -86,7 +88,7 @@ typedef unsigned char byte;
 	
 	The grammar consists thus of a list of non-terminals, where each
 	non-terminal has two list of alternatives (one for non-left recursive rules
-	and one for left recurise rules). Each alternative defines a rule, which
+	and one for left recursive rules). Each alternative defines a rule, which
 	consists of list of grammar elements. An element can be one of:
 	- character,
 	- character set,
@@ -110,8 +112,8 @@ typedef unsigned char byte;
 /*  Forward declarations of types to be defined later.  */
 
 typedef struct non_terminal non_terminal_t, *non_terminal_p;
-typedef struct or_rule or_rule_t, *or_rule_p;
-typedef struct rule rule_t, *rule_p;
+typedef struct alternative *alternative_p;
+typedef struct element *element_p;
 typedef struct char_set char_set_t, *char_set_p;
 typedef struct result result_t, *result_p;
 typedef struct text_pos text_pos_t, *text_pos_p;
@@ -120,10 +122,10 @@ typedef struct text_pos text_pos_t, *text_pos_p;
 
 struct non_terminal
 {
-	const char *name;     /* Name of the non-terminal */
-	or_rule_p first;      /* Normal alternatives */
-	or_rule_p recursive;  /* Left-recursive alternatives */
-	non_terminal_p next;  /* Next non-terminal (in the list) */
+	const char *name;         /* Name of the non-terminal */
+	alternative_p first;      /* Normal alternatives */
+	alternative_p recursive;  /* Left-recursive alternatives */
+	non_terminal_p next;      /* Next non-terminal (in the list) */
 };
 
 non_terminal_p find_nt(char *name, non_terminal_p *p_nt)
@@ -145,36 +147,36 @@ non_terminal_p find_nt(char *name, non_terminal_p *p_nt)
 
 typedef bool (*end_function_p)(const result_p rule_result, result_p result);
 
-struct or_rule
+struct alternative
 {
-	rule_p rule;                  /* The rule definition */
+	element_p rule;               /* The rule definition */
 	end_function_p end_function;  /* Function pointer */
-	or_rule_p next;               /* Next alternative */
+	alternative_p next;           /* Next alternative */
 };
 
-or_rule_p new_or_rule()
+alternative_p new_alternative()
 {
-	or_rule_p or_rule = MALLOC(or_rule_t);
-	or_rule->rule = NULL;
-	or_rule->end_function = NULL;
-	or_rule->next = NULL;
-	return or_rule;
+	alternative_p alternative = MALLOC(struct alternative);
+	alternative->rule = NULL;
+	alternative->end_function = NULL;
+	alternative->next = NULL;
+	return alternative;
 }
 
 /*  Defintion of an element of a rule  */
 
-enum rule_kind_t { rk_nt, rk_or, rk_char, rk_charset, rk_end };
+enum element_kind_t { rk_nt, rk_grouping, rk_char, rk_charset, rk_end };
 
-struct rule
+struct element
 {
-	enum rule_kind_t kind;
+	enum element_kind_t kind;
 	bool optional;
 	bool sequence;
 	bool avoid;
-	rule_p chain_rule;
+	element_p chain_rule;
 	union 
 	{   non_terminal_p non_terminal;
-		or_rule_p or_rule;
+		alternative_p alternative;
 		char ch;
 		char_set_p char_set;
 	} info;
@@ -186,27 +188,27 @@ struct rule
 	bool (*add_skip_function)(result_p prev, result_p result);
 	void (*set_pos)(result_p result, text_pos_p ps);
 	void (*begin_seq_function)(result_p prev, result_p seq);
-	rule_p next;
+	element_p next;
 };
 
-rule_p new_rule(enum rule_kind_t kind)
+element_p new_element(enum element_kind_t kind)
 {
-	rule_p rule = MALLOC(rule_t);
-	rule->next = NULL;
-	rule->optional = FALSE;
-	rule->sequence = FALSE;
-	rule->avoid = FALSE;
-	rule->chain_rule = NULL;
-	rule->kind = kind;
-	rule->condition = NULL;
-	rule->condition_argument = NULL;
-	rule->add_function = NULL;
-	rule->add_char_function = NULL;
-	rule->add_seq_function = NULL;
-	rule->add_skip_function = NULL;
-	rule->set_pos = NULL;
-	rule->begin_seq_function = NULL;
-	return rule;
+	element_p element = MALLOC(struct element);
+	element->next = NULL;
+	element->optional = FALSE;
+	element->sequence = FALSE;
+	element->avoid = FALSE;
+	element->chain_rule = NULL;
+	element->kind = kind;
+	element->condition = NULL;
+	element->condition_argument = NULL;
+	element->add_function = NULL;
+	element->add_char_function = NULL;
+	element->add_seq_function = NULL;
+	element->add_skip_function = NULL;
+	element->set_pos = NULL;
+	element->begin_seq_function = NULL;
+	return element;
 }
 
 /*  Definition of a character set (as a bit vector)  */
@@ -216,8 +218,8 @@ struct char_set
 	byte bitvec[32];
 };
 
-bool char_set_contains(char_set_p char_set, char ch) { return (char_set->bitvec[((byte)ch) >> 3] & (((byte)ch) & 0x7)) != 0; }
-void char_set_add_char(char_set_p char_set, char ch) { char_set->bitvec[((byte)ch) >> 3] |= (((byte)ch) & 0x7); }
+bool char_set_contains(char_set_p char_set, const char ch) { return (char_set->bitvec[((byte)ch) >> 3] & (1 << (((byte)ch) & 0x7))) != 0; }
+void char_set_add_char(char_set_p char_set, char ch) { char_set->bitvec[((byte)ch) >> 3] |= 1 << (((byte)ch) & 0x7); }
 void char_set_add_range(char_set_p char_set, char first, char last)
 {
 	byte ch = (byte)first;
@@ -228,78 +230,78 @@ void char_set_add_range(char_set_p char_set, char first, char last)
 
 /*  Printing routines for the internal representation  */
 
-void rule_print(FILE *f, rule_p rule);
+void element_print(FILE *f, element_p element);
 
-void or_rule_print(FILE *f, or_rule_p or)
+void alternative_print(FILE *f, alternative_p alternative)
 {
 	bool first = TRUE;
 
-	for (; or; or = or->next)
+	for (; alternative; alternative = alternative->next)
 	{   
 		if (!first)
 			fprintf(f, "|");
 		first = FALSE;
-		rule_print(f, or->rule);
+		element_print(f, alternative->rule);
 	}
 }
 
-void rule_print(FILE *f, rule_p rule)
+void element_print(FILE *f, element_p element)
 {   
-	if (rule == NULL)
+	if (element == NULL)
 		return;
 
-	switch(rule->kind)
+	switch(element->kind)
 	{
 		case rk_nt:
-			fprintf(f, "%s ", rule->info.non_terminal->name);
+			fprintf(f, "%s ", element->info.non_terminal->name);
 			break;
-		case rk_or:
+		case rk_grouping:
 			fprintf(f, "(");
-			or_rule_print(f, rule->info.or_rule);
+			alternative_print(f, element->info.alternative);
 			fprintf(f, ")");
 			break;
 		case rk_char:
-			fprintf(f, "'%c' ", rule->info.ch);
+			fprintf(f, "'%c' ", element->info.ch);
 			break;
 		case rk_charset:
 			fprintf(f, "cs ");
 			break;
 	}
 
-	if (rule->sequence)
-	{   if (rule->chain_rule == NULL)
+	if (element->sequence)
+	{   if (element->chain_rule == NULL)
 			fprintf(f, "SEQ ");
 		else
 		{
 			fprintf(f, "CHAIN (");
-			rule_print(f, rule->chain_rule);
+			element_print(f, element->chain_rule);
 			fprintf(f, ")");
 		}
 	}
-	if (rule->optional)
+	if (element->optional)
 	{   fprintf(f, "OPT ");
 	}
-	rule_print(f, rule->next);
+	element_print(f, element->next);
 }
 
 /*  Some macro definitions for defining a grammar more easily.  */
 
-#define HEADER(N) non_terminal_p *_nt = all_nt; non_terminal_p nt; or_rule_p* ref_or_rule; or_rule_p* ref_rec_or_rule; or_rule_p or_rule; rule_p* ref_rule; rule_p rule;
-#define NT_DEF(N) nt = find_nt(N, _nt); ref_or_rule = &nt->first; ref_rec_or_rule = &nt->recursive;
-#define OR or_rule = *ref_or_rule = new_or_rule(); ref_or_rule = &or_rule->next; ref_rule = &or_rule->rule;
-#define REC_OR or_rule = *ref_rec_or_rule = ; ref_rec_or_rule = &or_rule->next; ref_rule = &or_rule->rule;
-#define _NEW_GR(K) rule = *ref_rule = new_rule(K); ref_rule = &rule->next;
-#define NT(N,F) _NEW_GR(rk_nt) rule->info.non_terminal = find_nt(N, _nt); rule->add_function = F;
+#define HEADER(N) non_terminal_p *_nt = all_nt; non_terminal_p nt; alternative_p* ref_alternative; alternative_p* ref_rec_alternative; alternative_p alternative; element_p* ref_element; element_p element;
+#define NT_DEF(N) nt = find_nt(N, _nt); ref_alternative = &nt->first; ref_rec_alternative = &nt->recursive;
+#define RULE alternative = *ref_alternative = new_alternative(); ref_alternative = &alternative->next; ref_element = &alternative->rule;
+#define REC_RULE alternative = *ref_rec_alternative = ; ref_rec_alternative = &alternative->next; ref_element = &alternative->rule;
+#define _NEW_GR(K) element = *ref_element = new_element(K); ref_element = &element->next;
+#define NT(N,F) _NEW_GR(rk_nt) element->info.non_terminal = find_nt(N, _nt); element->add_function = F;
 #define END _NEW_GR(rk_end)
-#define SEQ(S,E) rule->sequence = TRUE; rule->begin_seq_function = S; rule->add_seq_function = E;
-#define OPT(F) rule->optional = TRUE; rule->add_skip_function = F;
-#define AVOID rule->avoid = TRUE;
-#define CHAR(C,F) _NEW_GR(rk_char) rule->info.ch = C; rule->add_char_function = F;
-#define CHARSET(F) _NEW_GR(rk_charset) rule->info.char_set = MALLOC(char_set_t); rule->add_char_function = F;
-#define ADD_CHAR(C) char_set_add_char(rule->info.char_set, C);
-#define ADD_RANGE(F,T) char_set_add_range(rule->info.char_set, F, T);
-#define END_FUNCTION(F) or_rule->end_function = F;
-#define OPEN _NEW_GR(rk_or) rule->info.or_rule = new_or_rule(); { or_rule_p* ref_or_rule = &rule->info.or_rule; or_rule_p or_rule; rule_p* ref_rule; rule_p rule;
+#define SEQ(S,E) element->sequence = TRUE; element->begin_seq_function = S; element->add_seq_function = E;
+#define OPT(F) element->optional = TRUE; element->add_skip_function = F;
+#define AVOID element->avoid = TRUE;
+#define CHAR(C,F) _NEW_GR(rk_char) element->info.ch = C; element->add_char_function = F;
+#define CHARSET(F) _NEW_GR(rk_charset) element->info.char_set = MALLOC(char_set_t); element->add_char_function = F;
+#define ADD_CHAR(C) char_set_add_char(element->info.char_set, C);
+#define ADD_RANGE(F,T) char_set_add_range(element->info.char_set, F, T);
+#define END_FUNCTION(F) alternative->end_function = F;
+#define OPEN _NEW_GR(rk_grouping) element->info.alternative = new_alternative(); { alternative_p* ref_alternative = &element->info.alternative; alternative_p alternative; element_p* ref_element; element_p element;
 #define CLOSE }
 		
 
@@ -309,7 +311,10 @@ void rule_print(FILE *f, rule_p rule)
 	~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 	
 	In this example, white space does not have a result, thus all function
-	pointers can be left 0.
+	pointers can be left 0. White space is defined as a (possible empty)
+	sequence of white space characters, the single line comment and the
+	traditional C-comment. 'OPEN' and 'CLOSE' are used to define a grouping.
+	The grouping contains three rules.
 */
 
 void white_space_grammar(non_terminal_p *all_nt)
@@ -317,19 +322,16 @@ void white_space_grammar(non_terminal_p *all_nt)
 	HEADER(all_nt)
 	
 	NT_DEF("white_space")
-		OR
+		RULE
 			OPEN
-				OR
-					/* The usual white space characters */
+				RULE /* for the usual white space characters */
 					CHARSET(0) ADD_CHAR(' ') ADD_CHAR('\t') ADD_CHAR('\n')
-				OR
-					/* The single line comment starting with two slashes */
+				RULE /* for the single line comment starting with two slashes */
 					CHAR('/', 0)
 					CHAR('/', 0)
 					CHARSET(0) ADD_RANGE(' ', 255) ADD_CHAR('\t') SEQ(0, 0) OPT(0)
 					CHAR('\n', 0)
-				OR
-					/* The traditional C-comment (using avoid modifier) */
+				RULE /* for the traditional C-comment (using avoid modifier) */
 					CHAR('/', 0)
 					CHAR('*', 0)
 					CHARSET(0) ADD_RANGE(' ', 255) ADD_CHAR('\t') ADD_CHAR('\n') SEQ(0, 0) OPT(0) AVOID
@@ -339,15 +341,49 @@ void white_space_grammar(non_terminal_p *all_nt)
 }
 
 
+/*
+	Example of defining a positive whole number grammar
+	~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	
+	In this example, a grammar is given for a positive whole number, and
+	explained how a result can be returned. A whole number is represented
+	by a sequence of characters in the range '0' to '9'. There are two
+	functions needed: One that takes a character and calculates the
+	resulting number when that character is added at the back of a number.
+	One that transfers the result of the sequence to result of the rule.
+	The first function needs to be passed as an argument to the CHARSET
+	define. The second function needs to be passed as the second argument
+	to the SEQ define.
+	If no function is set for processing the result of a rule, then the
+	result of the last element is returned.
+*/
+
+bool number_add_char(result_p prev, char ch, result_p result);
+bool use_sequence_result(result_p prev, result_p seq, result_p result);
+
+void number_grammar(non_terminal_p *all_nt)
+{
+	HEADER(all_nt)
+	
+	NT_DEF("number")
+		RULE
+			CHARSET(number_add_char) ADD_RANGE('0', '9') SEQ(0, use_sequence_result)
+}
 
 /*
+	To implement the two functions, some definitions are needed, which
+	will be explained below. 
+
+
 	Result
 	~~~~~~
-	
-	To be agnostic to the results produced by the scanner a void pointer is
-	used. To allow the implementation of reference counting, increment and
-	decrement function pointers can be used.
-	
+
+	Because the parser algorithm is agnostic to the types of results that
+	are used by grammar rule, a void pointer is used. Reference counting
+	is often used to manage dynamically allocated memory. It is a good
+	idea to group the void pointer with functions to increment and decrement
+	the reference count. The struct 'result' below also adds a function
+	pointer to a print function.
 */
 
 struct result
@@ -383,9 +419,23 @@ void result_release(result_p result)
 	result->data = NULL;
 }
 
+/*	Function for using result of a sequence  */
+
+bool use_sequence_result(result_p prev, result_p seq, result_p result)
+{
+	result_assign(result, seq);
+	return TRUE;
+}
+
 /*
 	Base for reference counting results
 	~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	
+	Because there is usually more than one type that needs to implement
+	reference counting, it is a good idea to define a base struct for it.
+	When this is used as the type of the first member in a struct
+	for a result, then the reference counting functions can be called
+	on these.
 */
 
 bool debug_allocations = FALSE;
@@ -394,47 +444,59 @@ typedef struct
 {
 	unsigned long cnt;
 } ref_counted_base_t, *ref_counted_base_p;
-void ref_counted_base_init(void *data) { ((ref_counted_base_p)data)->cnt = 1; }
+
 void ref_counted_base_inc(void *data) { ((ref_counted_base_p)data)->cnt++; }
 void ref_counted_base_dec(void *data) { if (--((ref_counted_base_p)data)->cnt == 0) { if (debug_allocations) fprintf(stderr, "Free %p\n", data); FREE(data);} }
 
-/*
-	Number result
-	~~~~~~~~~~~~~
-*/
-
-typedef struct
-{
-	ref_counted_base_t _base;
-	long num;
-} number_data_t, *number_data_p;
-
 void result_assign_ref_counted(result_p result, void *data)
 {
-	ref_counted_base_init(data);
+	((ref_counted_base_p)data)->cnt = 1;
 	result->data = data;
 	result->inc = ref_counted_base_inc;
 	result->dec = ref_counted_base_dec;
 }
 
-void number_print(void *data, FILE *fout)
+/*
+	Number result
+	~~~~~~~~~~~~~
+	
+	The struct for representing the number has but a single member
+	(besides the member for the reference counting base).
+*/
+
+typedef struct number_data
 {
-	fprintf(fout, "number %ld", ((number_data_p)data)->num);
-}
+	ref_counted_base_t _base;
+	long num;
+} *number_data_p;
+
+void number_print(void *data, FILE *fout) { fprintf(fout, "number %ld", ((number_data_p)data)->num); }
+
+/*
+	There are actually two ways to implement the function for adding
+	a character to a number. The first time the function is called
+	the data pointer of the previous result, will be 0. The first
+	solution, allocates new memory each time the function is called.
+	The reference counting will take care that after the whole
+	rule has been parsed all intermediate results will be freed again.
+	The second solution, only allocates memory once. In this case this
+	is possible, because the parser will not back-track during parsing
+	the number. Both solutions are given in the function below.
+*/
 
 bool number_add_char(result_p prev, char ch, result_p result)
 {
 #if 0 /* Allocating a result for each intermediate result */
-	number_data_p number_data = MALLOC(number_data_t);
+	number_data_p number_data = MALLOC(struct number_data);
 	if (debug_allocations) fprintf(stderr, "Allocated %p\n", number_data);
 	result_assign_ref_counted(result, number_data);
 	result->print = number_print;
 	long num = prev->data != NULL ? ((number_data_t*)prev->data)->num : 0;
 	number_data->num = 10 * num + ch - '0';
-#else /* Reusing the result (possible because there is no back-tracking involved) */
+#else /* Allocating the result but once */
 	if (prev->data == NULL)
 	{
-		number_data_p number_data = MALLOC(number_data_t);
+		number_data_p number_data = MALLOC(struct number_data);
 		if (debug_allocations) fprintf(stderr, "Allocated %p\n", number_data);
 		result_assign_ref_counted(result, number_data);
 		result->print = number_print;
@@ -449,30 +511,6 @@ bool number_add_char(result_p prev, char ch, result_p result)
 	return TRUE;
 }
 
-bool number_add_seq(result_p prev, result_p seq, result_p result)
-{
-	result_assign(result, seq);
-	return TRUE;
-}
-
-
-void number_grammar(non_terminal_p *all_nt)
-{
-	HEADER(all_nt)
-	
-	NT_DEF("number")
-		OR
-			CHARSET(number_add_char) ADD_RANGE('0', '9') SEQ(0, number_add_seq)
-			NT("white_space", 0)
-		  END_FUNCTION(0)
-}
-
-
-
-
-
-
-
 /*
 	Storing the input text
 	~~~~~~~~~~~~~~~~~~~~~~
@@ -485,21 +523,21 @@ void number_grammar(non_terminal_p *all_nt)
 
 struct text_pos
 {
-	longword pos;     // Positive offset from the start of the file
-	word cur_line;    // Line number (1-based) with the position
-	word cur_column;  // Column number (1-based) with the position
+	longword pos;     /* Positive offset from the start of the file */
+	word cur_line;    /* Line number (1-based) with the position */
+	word cur_column;  /* Column number (1-based) with the position */
 };
 
 typedef struct
 {
-	char *buffer;         // String containting the input text
-	longword buffer_len;  // Length of the input text
-	text_pos_t pos;       // Current position in the input text
-	char *info;           // Contents starting at the current position
-	word tab_size;        // Tabs are on multiples of the tab_size
+	const char *buffer;   /* String containting the input text */
+	longword buffer_len;  /* Length of the input text */
+	text_pos_t pos;       /* Current position in the input text */
+	const char *info;     /* Contents starting at the current position */
+	word tab_size;        /* Tabs are on multiples of the tab_size */
 } text_buffer_t, *text_buffer_p;
 
-void text_buffer_assign_string(text_buffer_p text_buffer, char* text)
+void text_buffer_assign_string(text_buffer_p text_buffer, const char* text)
 {
 	text_buffer->tab_size = 4;
 	text_buffer->buffer_len = strlen(text);
@@ -563,17 +601,17 @@ typedef struct solution_t solution_t, *solution_p;
 
 struct solution_t 
 {
-	const char *nt;          // The name of the non-terminal
-	enum success_t success;  // Could said non-terminal be parsed from position
-	result_t result;         // If so, what result did it produce
-	text_pos_t sp;           // The position (with line and column numbers)
-	solution_p next;         // Next solution at this location
+	const char *nt;          /* The name of the non-terminal */
+	enum success_t success;  /* Could said non-terminal be parsed from position */
+	result_t result;         /* If so, what result did it produce */
+	text_pos_t sp;           /* The position (with line and column numbers) */
+	solution_p next;         /* Next solution at this location */
 };
 
 typedef struct
 {
-	solution_p *sols;        // Array of solutions at locations
-	longword len;            // Length of array (equal to length of input)
+	solution_p *sols;        /* Array of solutions at locations */
+	longword len;            /* Length of array (equal to length of input) */
 } solutions_t, *solutions_p;
 
 void solutions_init(solutions_p solutions, text_buffer_p text_buffer)
@@ -640,8 +678,8 @@ bool debug_nt = FALSE;
 #define DEBUG_TAB if (debug_parse) printf("%*.*s", depth, depth, "")
 #define DEBUG_NL if (debug_parse) printf("\n")
 #define DEBUG_PT(X) if (debug_parse) if (X->print != 0) { X->print(X->data, stdout); } else { printf("<NO_RESULT>"); }
-#define DEBUG_PO(X) if (debug_parse) or_rule_print(stdout, X)
-#define DEBUG_PR(X) if (debug_parse) rule_print(stdout, X)
+#define DEBUG_PO(X) if (debug_parse) alternative_print(stdout, X)
+#define DEBUG_PR(X) if (debug_parse) element_print(stdout, X)
 #define DEBUG_(X)  if (debug_parse) printf(X)
 #define DEBUG_P1(X,A) if (debug_parse) printf(X,A)
 
@@ -653,7 +691,7 @@ typedef struct
 	text_buffer_p text_buffer;
 	solutions_t solutions;
 	const char *current_nt;
-	rule_p current_rule;
+	element_p current_element;
 } parser_t, *parser_p;
 
 void parser_init(parser_p parser, text_buffer_p text_buffer)
@@ -661,7 +699,7 @@ void parser_init(parser_p parser, text_buffer_p text_buffer)
 	parser->text_buffer = text_buffer;
 	solutions_init(&parser->solutions, text_buffer);
 	parser->current_nt = NULL;
-	parser->current_rule = NULL;
+	parser->current_element = NULL;
 }
 
 void parser_fini(parser_p parser)
@@ -670,8 +708,8 @@ void parser_fini(parser_p parser)
 }
 
 
-bool parse_rule(parser_p parser, rule_p rule, const result_p prev_result, end_function_p end_function, result_p rule_result);
-bool parse_seq(parser_p parser, rule_p rule, const result_p prev_seq, const result_p prev, end_function_p end_function, result_p result);
+bool parse_element(parser_p parser, element_p element, const result_p prev_result, end_function_p end_function, result_p rule_result);
+bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, end_function_p end_function, result_p result);
 
 
 bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
@@ -703,15 +741,15 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 		depth += 2; 
 	}
 
-	or_rule_p or;
-	for (or = non_term->first; or != NULL; or = or->next )
+	alternative_p alternative;
+	for (alternative = non_term->first; alternative != NULL; alternative = alternative->next )
 	{
 		DECL_RESULT(start)
-		if (parse_rule(parser, or->rule, &start, or->end_function, result))
+		if (parse_element(parser, alternative->rule, &start, alternative->end_function, result))
 			break;
 	}
 	
-	if (or == NULL)
+	if (alternative == NULL)
 	{
 		DEBUG_EXIT_P1("parse_nt(%s) - failed", nt);  DEBUG_NL;
 		if (debug_nt)
@@ -726,10 +764,10 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 	
 	for(;;)
 	{
-		for ( or = non_term->recursive; or != NULL; or = or->next )
+		for ( alternative = non_term->recursive; alternative != NULL; alternative = alternative->next )
 		{
 			DECL_RESULT(rule_result)
-			if (parse_rule(parser, or->rule, result, or->end_function, &rule_result))
+			if (parse_element(parser, alternative->rule, result, alternative->end_function, &rule_result))
 			{   
 				result_assign(result, &rule_result);
 				DISP_RESULT(rule_result)
@@ -738,11 +776,11 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 			DISP_RESULT(rule_result)
 		}
 
-		if (or == NULL)
+		if (alternative == NULL)
 			break;
 	}
 
-	DEBUG_EXIT_P1("parse_nt(%s) =", nt);
+	DEBUG_EXIT_P1("parse_nt(%s) = ", nt);
 	DEBUG_PT(result); DEBUG_NL;
 	if (debug_nt)
 	{   depth -= 2;
@@ -756,53 +794,53 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 	return TRUE;
 }
 
-bool parse_or(parser_p parser, or_rule_p or, result_p result)
+bool parse_grouping(parser_p parser, alternative_p alternative, result_p result)
 {
-	DEBUG_ENTER("parse_or: ");
-	DEBUG_PO(or); DEBUG_NL;
+	DEBUG_ENTER("parse_grouping: ");
+	DEBUG_PO(alternative); DEBUG_NL;
 
-	for ( ; or != NULL; or = or->next )
+	for ( ; alternative != NULL; alternative = alternative->next )
 	{
 		DECL_RESULT(start);
-		if (parse_rule(parser, or->rule, &start, or->end_function, result))
+		if (parse_element(parser, alternative->rule, &start, alternative->end_function, result))
 		{
 			DISP_RESULT(start);
-			DEBUG_EXIT("parse_or = ");
+			DEBUG_EXIT("parse_grouping = ");
 			DEBUG_PT(result); DEBUG_NL;
 			return TRUE;
 		}
 		DISP_RESULT(start);
 	}
-	DEBUG_EXIT("parse_or: failed"); DEBUG_NL;
+	DEBUG_EXIT("parse_grouping: failed"); DEBUG_NL;
 	return FALSE;
 }
 
 
-bool parse_part(parser_p parser, rule_p rule, const result_p prev_result, result_p result)
+bool parse_part(parser_p parser, element_p element, const result_p prev_result, result_p result)
 {
 	text_pos_t sp = parser->text_buffer->pos;
 
 	bool accepted = FALSE;
-	switch( rule->kind )
+	switch( element->kind )
 	{
 		case rk_nt:
 			{
 				DECL_RESULT(nt_result)
-				if (!parse_nt(parser, rule->info.non_terminal, &nt_result))
+				if (!parse_nt(parser, element->info.non_terminal, &nt_result))
 				{
 					DISP_RESULT(nt_result)
 					return FALSE;
 				}
 				
-				if (rule->condition != 0 && !(*rule->condition)(&nt_result, rule->condition_argument))
+				if (element->condition != 0 && !(*element->condition)(&nt_result, element->condition_argument))
 				{
 					DISP_RESULT(nt_result)
 					text_buffer_set_pos(parser->text_buffer, &sp);
 					return FALSE;
 				}				
-				if (rule->add_function == 0)
+				if (element->add_function == 0)
 					result_assign(result, prev_result);
-				else if (!(*rule->add_function)(prev_result, &nt_result, result))
+				else if (!(*element->add_function)(prev_result, &nt_result, result))
 				{
 					DISP_RESULT(nt_result)
 					text_buffer_set_pos(parser->text_buffer, &sp);
@@ -811,23 +849,23 @@ bool parse_part(parser_p parser, rule_p rule, const result_p prev_result, result
 				DISP_RESULT(nt_result)
 			}
 			break;
-		case rk_or:
+		case rk_grouping:
 			{
-				DECL_RESULT(or_result);
-				if (!parse_or(parser, rule->info.or_rule, &or_result))
+				DECL_RESULT(grouping_result);
+				if (!parse_grouping(parser, element->info.alternative, &grouping_result))
 				{
-					DISP_RESULT(or_result)
+					DISP_RESULT(grouping_result)
 					return FALSE;
 				}
-				if (rule->add_function == 0)
+				if (element->add_function == 0)
 					result_assign(result, prev_result);
-				else if (!(*rule->add_function)(prev_result, &or_result, result))
+				else if (!(*element->add_function)(prev_result, &grouping_result, result))
 				{
-					DISP_RESULT(or_result)
+					DISP_RESULT(grouping_result)
 					text_buffer_set_pos(parser->text_buffer, &sp);
 					return FALSE;
 				}
-				DISP_RESULT(or_result)
+				DISP_RESULT(grouping_result)
 			}
 			break;
 		case rk_end:
@@ -836,23 +874,23 @@ bool parse_part(parser_p parser, rule_p rule, const result_p prev_result, result
 			result_assign(result, prev_result);
 			break;
 		case rk_char:
-			if (*parser->text_buffer->info != rule->info.ch)
+			if (*parser->text_buffer->info != element->info.ch)
 				return FALSE;
 			text_buffer_next(parser->text_buffer);
-			if (rule->add_char_function == 0)
+			if (element->add_char_function == 0)
 				result_assign(result, prev_result);
-			else if (!(*rule->add_char_function)(prev_result, rule->info.ch, result))
+			else if (!(*element->add_char_function)(prev_result, element->info.ch, result))
 				return FALSE;
 			break;
 		case rk_charset:
-			if (!char_set_contains(rule->info.char_set, *parser->text_buffer->info))
+			if (!char_set_contains(element->info.char_set, *parser->text_buffer->info))
 				return FALSE;
 			{
 				char ch = *parser->text_buffer->info;
 				text_buffer_next(parser->text_buffer);
-				if (rule->add_char_function == 0)
+				if (element->add_char_function == 0)
 					result_assign(result, prev_result);
-				else if (!(*rule->add_char_function)(prev_result, ch, result))
+				else if (!(*element->add_char_function)(prev_result, ch, result))
 					return FALSE;
 			}
 			break;
@@ -860,24 +898,24 @@ bool parse_part(parser_p parser, rule_p rule, const result_p prev_result, result
 			return FALSE;
 			break;
 	}
-	if (rule->set_pos != NULL)
-		rule->set_pos(result, &sp);
+	if (element->set_pos != NULL)
+		element->set_pos(result, &sp);
 
 	return TRUE;
 }
 
-bool parse_rule(parser_p parser, rule_p rule, const result_p prev_result, end_function_p end_function, result_p rule_result)
+bool parse_element(parser_p parser, element_p element, const result_p prev_result, end_function_p end_function, result_p rule_result)
 {
-	DEBUG_ENTER("parse_rule: ");
-	DEBUG_PR(rule); DEBUG_NL;
+	DEBUG_ENTER("parse_element: ");
+	DEBUG_PR(element); DEBUG_NL;
 
 	/* At the end of the rule: */
-	if (rule == NULL)
+	if (element == NULL)
 	{   if (end_function != 0)
 			end_function(prev_result, rule_result);
 		else
 			result_assign(rule_result, prev_result);
-		DEBUG_EXIT("parse_rule = ");
+		DEBUG_EXIT("parse_element = ");
 		DEBUG_PT(rule_result); DEBUG_NL;
 		return TRUE;
 	}
@@ -886,25 +924,25 @@ bool parse_rule(parser_p parser, rule_p rule, const result_p prev_result, end_fu
 	sp = parser->text_buffer->pos;
 	
 
-	if (rule->optional && rule->avoid)
+	if (element->optional && element->avoid)
 	{
 		DECL_RESULT(skip_result);
-		if (rule->add_skip_function != NULL)
+		if (element->add_skip_function != NULL)
 		{
-			rule->add_skip_function(prev_result, &skip_result);
+			element->add_skip_function(prev_result, &skip_result);
 		}
-		else if (rule->add_function != NULL)
+		else if (element->add_function != NULL)
 		{
 			DECL_RESULT(empty);
-			rule->add_function(prev_result, &empty, &skip_result);
+			element->add_function(prev_result, &empty, &skip_result);
 			DISP_RESULT(empty);
 		}
 		else
 			result_assign(&skip_result, prev_result);
-		if (parse_rule(parser, rule->next, &skip_result, end_function, rule_result))
+		if (parse_element(parser, element->next, &skip_result, end_function, rule_result))
 		{
 			DISP_RESULT(skip_result);
-            DEBUG_EXIT("parse_rule = ");
+            DEBUG_EXIT("parse_element = ");
             DEBUG_PT(rule_result); DEBUG_NL;
 			return TRUE;
 		}
@@ -912,19 +950,19 @@ bool parse_rule(parser_p parser, rule_p rule, const result_p prev_result, end_fu
 	}
 		
 	DECL_RESULT(part_result);
-	if (rule->sequence)
+	if (element->sequence)
 	{
 		DECL_RESULT(seq_begin);
-		if (rule->begin_seq_function != NULL)
-			rule->begin_seq_function(prev_result, &seq_begin);
+		if (element->begin_seq_function != NULL)
+			element->begin_seq_function(prev_result, &seq_begin);
 		DECL_RESULT(seq_elem);
-		if (parse_part(parser, rule, &seq_begin, &seq_elem))
+		if (parse_part(parser, element, &seq_begin, &seq_elem))
 		{
-			if (parse_seq(parser, rule, &seq_elem, prev_result, end_function, rule_result))
+			if (parse_seq(parser, element, &seq_elem, prev_result, end_function, rule_result))
 			{
 				DISP_RESULT(seq_elem);
 				DISP_RESULT(seq_begin);
-				DEBUG_EXIT("parse_rule = ");
+				DEBUG_EXIT("parse_element = ");
 				DEBUG_PT(rule_result); DEBUG_NL;
 				return TRUE;
 			}
@@ -935,12 +973,12 @@ bool parse_rule(parser_p parser, rule_p rule, const result_p prev_result, end_fu
 	else
 	{
 		DECL_RESULT(elem);
-		if (parse_part(parser, rule, prev_result, &elem))
+		if (parse_part(parser, element, prev_result, &elem))
 		{
-			if (parse_rule(parser, rule->next, &elem, end_function, rule_result))
+			if (parse_element(parser, element->next, &elem, end_function, rule_result))
 			{
 				DISP_RESULT(elem);
-				DEBUG_EXIT("parse_rule = ");
+				DEBUG_EXIT("parse_element = ");
 				DEBUG_PT(rule_result); DEBUG_NL;
 				return TRUE;
 			}
@@ -948,25 +986,25 @@ bool parse_rule(parser_p parser, rule_p rule, const result_p prev_result, end_fu
 		DISP_RESULT(elem);
 	}
 				
-	if (rule->optional && !rule->avoid)
+	if (element->optional && !element->avoid)
 	{
 		DECL_RESULT(skip_result);
-		if (rule->add_skip_function != NULL)
+		if (element->add_skip_function != NULL)
 		{
-			rule->add_skip_function(prev_result, &skip_result);
+			element->add_skip_function(prev_result, &skip_result);
 		}
-		else if (rule->add_function != NULL)
+		else if (element->add_function != NULL)
 		{
 			DECL_RESULT(empty);
-			rule->add_function(prev_result, &empty, &skip_result);
+			element->add_function(prev_result, &empty, &skip_result);
 			DISP_RESULT(empty);
 		}
 		else
 			result_assign(&skip_result, prev_result);
-		if (parse_rule(parser, rule->next, &skip_result, end_function, rule_result))
+		if (parse_element(parser, element->next, &skip_result, end_function, rule_result))
 		{
 			DISP_RESULT(skip_result);
-            DEBUG_EXIT("parse_rule = ");
+            DEBUG_EXIT("parse_element = ");
             DEBUG_PT(rule_result); DEBUG_NL;
 			return TRUE;
 		}
@@ -975,17 +1013,18 @@ bool parse_rule(parser_p parser, rule_p rule, const result_p prev_result, end_fu
 
 	text_buffer_set_pos(parser->text_buffer, &sp);
 	
+    DEBUG_EXIT("parse_element: failed"); DEBUG_NL;
 	return FALSE;
 }
 
-bool parse_seq(parser_p parser, rule_p rule, const result_p prev_seq, const result_p prev, end_function_p end_function, result_p rule_result)
+bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, end_function_p end_function, result_p rule_result)
 {
-	if (rule->avoid)
+	if (element->avoid)
 	{
 		DECL_RESULT(result);
-		if (rule->add_seq_function != NULL)
-			rule->add_seq_function(prev, prev_seq, &result);
-		if (parse_rule(parser, rule->next, &result, end_function, rule_result))
+		if (element->add_seq_function != NULL)
+			element->add_seq_function(prev, prev_seq, &result);
+		if (parse_element(parser, element->next, &result, end_function, rule_result))
 		{
 			DISP_RESULT(result);
 			return TRUE;
@@ -993,10 +1032,10 @@ bool parse_seq(parser_p parser, rule_p rule, const result_p prev_seq, const resu
 		DISP_RESULT(result);
 	}
 	
-	if (rule->chain_rule != NULL)
+	if (element->chain_rule != NULL)
 	{
 		DECL_RESULT(dummy_chain_elem);
-		if (!parse_rule(parser, rule->chain_rule, NULL, NULL, &dummy_chain_elem))
+		if (!parse_element(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem))
 		{
 			DISP_RESULT(dummy_chain_elem);
 			return FALSE;
@@ -1005,24 +1044,24 @@ bool parse_seq(parser_p parser, rule_p rule, const result_p prev_seq, const resu
 	}
 
 	DECL_RESULT(seq_elem);
-	if (parse_part(parser, rule, prev_seq, &seq_elem))
+	if (parse_part(parser, element, prev_seq, &seq_elem))
 	{
-		if (parse_seq(parser, rule, &seq_elem, prev, end_function, rule_result))
+		if (parse_seq(parser, element, &seq_elem, prev, end_function, rule_result))
 		{
 			DISP_RESULT(seq_elem);
-			DEBUG_EXIT("parse_rule = ");
+			DEBUG_EXIT("parse_element = ");
 			DEBUG_PT(rule_result); DEBUG_NL;
 			return TRUE;
 		}
 	}
 	DISP_RESULT(seq_elem);
 	
-	if (!rule->avoid)
+	if (!element->avoid)
 	{
 		DECL_RESULT(result);
-		if (rule->add_seq_function != NULL)
-			rule->add_seq_function(prev, prev_seq, &result);
-		if (parse_rule(parser, rule->next, &result, end_function, rule_result))
+		if (element->add_seq_function != NULL)
+			element->add_seq_function(prev, prev_seq, &result);
+		if (parse_element(parser, element->next, &result, end_function, rule_result))
 		{
 			DISP_RESULT(result);
 			return TRUE;
@@ -1033,19 +1072,42 @@ bool parse_seq(parser_p parser, rule_p rule, const result_p prev_seq, const resu
 	return FALSE;
 }
 
-		
 
-
-void test_parse_number(non_terminal_p *all_nt, const char *input, int num)
+void test_parse_white_space(non_terminal_p *all_nt, const char *input)
 {
 	text_buffer_t text_buffer;
-	text_buffer_assign_string(&text_buffer, "123");
+	text_buffer_assign_string(&text_buffer, input);
 	
 	parser_t parser;
 	parser_init(&parser, &text_buffer);
 	
 	DECL_RESULT(result);
-	if (parse_nt(&parser, find_nt("number", all_nt), &result))
+	if (parse_nt(&parser, find_nt("white_space", all_nt), &result) && text_buffer_end(&text_buffer))
+	{
+		fprintf(stderr, "OK: parsed white space\n");
+	}
+	else
+	{
+		fprintf(stderr, "ERROR: failed to parse white space from '%s'\n", input);
+	}
+}
+
+void test_white_space_grammar(non_terminal_p *all_nt)
+{
+	test_parse_white_space(all_nt, " ");
+	test_parse_white_space(all_nt, "/* */");
+}
+
+void test_parse_number(non_terminal_p *all_nt, const char *input, int num)
+{
+	text_buffer_t text_buffer;
+	text_buffer_assign_string(&text_buffer, input);
+	
+	parser_t parser;
+	parser_init(&parser, &text_buffer);
+	
+	DECL_RESULT(result);
+	if (parse_nt(&parser, find_nt("number", all_nt), &result) && text_buffer_end(&text_buffer))
 	{
 		if (result.data == NULL)
 			fprintf(stderr, "ERROR: parsing '%s' did not return result\n", input);
@@ -1064,16 +1126,22 @@ void test_parse_number(non_terminal_p *all_nt, const char *input, int num)
 
 void test_number_grammar(non_terminal_p *all_nt)
 {
-	number_grammar(all_nt);
-	
+	test_parse_number(all_nt, "0", 0);
 	test_parse_number(all_nt, "123", 123);
 }
 
 int main(int argc, char *argv[])
 {
 	non_terminal_p all_nt = NULL;
+
+	// debug_parse = TRUE;
+	
 	white_space_grammar(&all_nt);
+	test_white_space_grammar(&all_nt);
+
+	number_grammar(&all_nt);
 	test_number_grammar(&all_nt);
+
 	return 0;
 }
 
@@ -1696,78 +1764,6 @@ bool accept_eof()
 
 
 
-/*
-	Internal representation parsing rules
-	~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-	The following section of the code deals with internal
-	representation of the parsing rules as they are used
-	by the parsing routines. 
-*/
-
-typedef struct val_t  val_t, *val_p;
-typedef struct or_rule_t or_rule_t, *or_rule_p;
-typedef struct non_terminal_t non_terminal_t, *non_terminal_p;
-typedef struct ident_t ident_t, *ident_p;
-typedef struct rule_t rule_t, *rule_p;
-
-struct val_t
-{   val_p prev;
-	tree_p last;
-};
-
-struct or_rule_t
-{   or_rule_p next;
-	rule_p rule;
-	char *tree_name;
-};
-
-struct non_terminal_t
-{   non_terminal_p next;
-	char *name;
-	or_rule_p first;
-	or_rule_p recursive;
-};
-
-struct ident_t
-{	int kind;
-	char *ident_class;
-	terminal_p terminal;
-};
-
-typedef enum { rk_nt, rk_or, rk_
-	
-struct rule_t
-{   rule_p next;
-	bool optional;
-	bool sequence;
-	char *chain_symbol;
-	int kind;
-	union 
-	{   non_terminal_p non_terminal;
-		or_rule_p or_rule;
-		char *str_value;
-		ident_p ident;
-	} info;
-};
-
-#define RK_NT			  0
-#define RK_LIT			 1
-#define RK_OR_RULE		 2
-#define RK_T_EOF		   3
-#define RK_TERM			   4
-#define RK_IDENT		   5
-
-#define IK_IDENTDEF	  1
-#define IK_IDENTDEFADD   2
-#define IK_IDENTUSE	  3
-#define IK_IDENTFIELD	4
-
-non_terminal_p all_nt = NULL;
-
-non_terminal_p find_nt(char *name);
-rule_p make_rule(list_p rules);
-or_rule_p make_or_rule(list_p or);
-void make_all_nt(tree_p root);
 
 char *str_root,
 	 *str_nt_def,
@@ -1786,185 +1782,6 @@ char *str_root,
 	 *str_eof;
 
 
-/*
-	Filling the internal parser rules
-	~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-	The following section of code gives the procedures, which
-	transform a grammer, represented as an Abstract Program Tree
-	(which was produced when parsing the input grammar with the
-	input grammar of IParse), into the internal representation
-	of the parsing rules.
-*/
-
-rule_p make_rule(list_p rule)
-{   rule_p result;
-	tree_p elem; /* only used as pointer */
- 
-	if (rule == NULL)
-		return NULL;
-
-	result = MALLOC(rule_t);
-	result->optional = FALSE;
-	result->sequence = FALSE;
-	result->chain_symbol = NULL;
-
-	elem = rule->first;
-	/* Is the first element optional? */
-	if (equal_tree(elem, str_opt))
-	{   result->optional = TRUE;
-		elem = elements(elem)->first;
-	}
-
-	/* Is it a sequence, chain or list? */
-	if (equal_tree(elem, str_seq))
-	{   result->sequence = TRUE;
-		elem = elements(elem)->first;
-	}
-	else if (equal_tree(elem, str_chain))
-	{   result->sequence = TRUE;
-		result->chain_symbol = elements(elem)->next->first->c.str_value;
-		elem = elements(elem)->first;
-	}
-	else if (equal_tree(elem, str_list))
-	{   result->sequence = TRUE;
-		result->chain_symbol = ",";
-		elem = elements(elem)->first;
-	}
-
-	if (is_a_ident(elem))
-	{
-		if (equal_ident(elem, str_eof))
-			result->kind = RK_T_EOF;
-		else
-		{
-			terminal_p terminal = find_terminal(elem->c.str_value);
-			
-			if (terminal != NULL)
-			{
-				result->kind = RK_TERM;
-				result->info.terminal = terminal;
-			}
-			else
-			{
-				result->kind = RK_NT;
-				result->info.non_terminal = find_nt(elem->c.str_value);
-				if (result->info.non_terminal == NULL)
-				{
-					printf("Undefined non-terminal: '%s'\n", elem->c.str_value);
-					exit(1);
-				}
-			}
-		}
-	}
-	else if (is_tree(elem, str_identalone))
-	{
-		result->kind = RK_TERM;
-		result->info.terminal = find_terminal(str_ident);
-	}
-	else if (is_a_str(elem))
-	{
-		result->kind = RK_LIT;
-		result->info.str_value = elem->c.str_value;
-	}
-	else if (is_a_list(elem))
-	{
-		result->kind = RK_OR_RULE;
-		result->info.or_rule = make_or_rule(elements(elem));
-	}
-	result->next = make_rule(rule->next);
-
-	return result;
-}
-
-or_rule_p make_or_rule(list_p or)
-{
-	if (or == NULL)
-		return NULL;
-
-	{   tree_p rule = or->first; /* only used as pointer */
-		if (is_tree(rule, str_rule))
-		{   list_p elem = elements(rule);
-			or_rule_p result = MALLOC(or_rule_t);
-
-			if (elem->first == NULL)
-			{
-				result->rule = NULL;
-				result->tree_name = NULL;
-			}
-			else
-			{   result->rule = make_rule(elements(elem->first));
-				result->tree_name =   is_a_ident(elem->next->first)
-									? elem->next->first->c.str_value : NULL;
-			}
-			result->next = make_or_rule(or->next);
-			return result;
-		}
-	}
- 
-	return make_or_rule(or->next);
-}
-
-void make_all_nt(tree_p root)
-{
-	list_p rules;
-
-	all_nt = NULL;
-	
-	for (rules = root->c.parts; rules; rules = rules->next)
-		if (is_tree(rules->first, str_nt_def))
-		{   char *nt_name = part(rules->first, 1)->c.str_value;
-			non_terminal_p nt = find_nt(nt_name);
-			or_rule_p *p_first = &nt->first;
-			or_rule_p *p_recursive = &nt->recursive;
-			list_p or = part(rules->first, 2)->c.parts;
-
-			while (*p_first != NULL)
-				p_first = &(*p_first)->next;
-			while (*p_recursive != NULL)
-				p_recursive = &(*p_recursive)->next;
-
-			for (; or != NULL; or = or->next)
-			{   tree_p rule = or->first; /* only used as pointer */
-				if (is_tree(rule, str_rule))
-				{   list_p elem = elements(rule);
-					or_rule_p new = MALLOC(or_rule_t);
-
-					if (elem->first == NULL)
-					{   new->rule = NULL;
-						new->tree_name = NULL;
-						new->next = NULL;
-						*p_first = new;
-						p_first = &new->next;
-					}
-					else
-					{   list_p parts = elements(elem->first);
-						new->tree_name =   is_a_ident(elem->next->first)
-										 ? elem->next->first->c.str_value
-										 : NULL;
-						new->next = NULL;
-						if (parts == NULL || !is_ident(parts->first, nt_name))
-						{
-							new->rule = make_rule(parts);
-							*p_first = new;
-							p_first = &new->next;
-						}
-						else
-						{
-							new->rule = make_rule(parts->next);
-							*p_recursive = new;
-							p_recursive = &new->next;
-						}
-					}					 
-				}
-			}
-		}
-	{	non_terminal_p nt;
-	
-		for (nt = all_nt; nt != NULL; nt = nt->next)
-			if (nt->first == NULL && nt->recursive == NULL)
-				printf("Non-terminal '%s' has no rule.\n", nt->name);
-	}			
-}
 
 /*
    Result
@@ -2013,7 +1830,7 @@ char keyword_flag = 1,
 typedef struct {
   char *sym;
   char *in_nt;
-  rule_p rule;
+  element_p rule;
   char *is_keyword;
 } expect_t;
 expect_t expect[MAX_EXP_SYM];
