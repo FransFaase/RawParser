@@ -438,7 +438,7 @@ bool use_sequence_result(result_p prev, result_p seq, result_p result)
 	on these.
 */
 
-bool debug_allocations = FALSE;
+bool debug_allocations = TRUE; //FALSE;
 
 typedef struct
 {
@@ -450,6 +450,7 @@ void ref_counted_base_dec(void *data) { if (--((ref_counted_base_p)data)->cnt ==
 
 void result_assign_ref_counted(result_p result, void *data)
 {
+	if (debug_allocations) fprintf(stderr, "Allocated %p\n", data);
 	((ref_counted_base_p)data)->cnt = 1;
 	result->data = data;
 	result->inc = ref_counted_base_inc;
@@ -470,7 +471,16 @@ typedef struct number_data
 	long num;
 } *number_data_p;
 
+#define NUMBER_DATA_NUM(R) (((number_data_p)(R)->data)->num)
+
 void number_print(void *data, FILE *fout) { fprintf(fout, "number %ld", ((number_data_p)data)->num); }
+
+void new_number_data(result_p result)
+{
+	result_assign_ref_counted(result, MALLOC(struct number_data));
+	result->print = number_print;
+}
+
 
 /*
 	There are actually two ways to implement the function for adding
@@ -487,25 +497,19 @@ void number_print(void *data, FILE *fout) { fprintf(fout, "number %ld", ((number
 bool number_add_char(result_p prev, char ch, result_p result)
 {
 #if 0 /* Allocating a result for each intermediate result */
-	number_data_p number_data = MALLOC(struct number_data);
-	if (debug_allocations) fprintf(stderr, "Allocated %p\n", number_data);
-	result_assign_ref_counted(result, number_data);
-	result->print = number_print;
-	long num = prev->data != NULL ? ((number_data_t*)prev->data)->num : 0;
-	number_data->num = 10 * num + ch - '0';
+	new_number_data(result);
+	long num = prev->data != NULL ? NUMBER_DATA_NUM(prev) : 0;
+	NUMBER_DATA_NUM(result) = 10 * num + ch - '0';
 #else /* Allocating the result but once */
 	if (prev->data == NULL)
 	{
-		number_data_p number_data = MALLOC(struct number_data);
-		if (debug_allocations) fprintf(stderr, "Allocated %p\n", number_data);
-		result_assign_ref_counted(result, number_data);
-		result->print = number_print;
-		number_data->num = ch - '0';
+		new_number_data(result);
+		NUMBER_DATA_NUM(result) = ch - '0';
 	}
 	else
 	{
 		result_assign(result, prev);
-		((number_data_p)result->data)->num = 10 * ((number_data_p)result->data)->num + ch - '0';
+		NUMBER_DATA_NUM(result) = 10 * NUMBER_DATA_NUM(result) + ch - '0';
 	}
 #endif
 	return TRUE;
