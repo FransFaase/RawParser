@@ -419,6 +419,10 @@ void result_release(result_p result)
 	result->data = NULL;
 }
 
+#define DECL_RESULT(V) result_t V; result_init(&V);
+#define DISP_RESULT(V) result_release(&V);
+
+
 /*	Function for using result of a sequence  */
 
 bool use_sequence_result(result_p prev, result_p seq, result_p result)
@@ -438,7 +442,7 @@ bool use_sequence_result(result_p prev, result_p seq, result_p result)
 	on these.
 */
 
-bool debug_allocations = TRUE; //FALSE;
+bool debug_allocations = FALSE;
 
 typedef struct
 {
@@ -516,13 +520,24 @@ bool number_add_char(result_p prev, char ch, result_p result)
 }
 
 /*
-	Storing the input text
-	~~~~~~~~~~~~~~~~~~~~~~
+	Implementing a back-tracking parser on a text buffer
+	~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 	
-	We presume that the parsing algorithm as full access to the input text.
-	To implement this the input text is strored in to string. We also want
-	to keep track of positions in this input text in terms of lines and
-	columns.
+	The most 'simple' parsing algorithm, is a back-tracking recursive decent
+	parser on a text buffer that is stored in memory. Nowadays memory is
+	cheap and storing whole files as strings in memory is usually no problem
+	at all. (The hardest part about this parser is the reference counting of
+	the results.)
+	
+	This parser will simply take the grammar specification and try to parse
+	the text in the buffer. If it fails at some point, it will simply
+	back-track to where it started the current alternative and try the next
+	alternative. It continues doing so until it parses the whole contents or
+	fails after having tried all (nested) alternatives.
+	
+	Below, we first define a text position and a text buffer that will be
+	used by the back-tracking parser.
+	
 */
 
 struct text_pos
@@ -589,86 +604,28 @@ void text_buffer_set_pos(text_buffer_p text_file, text_pos_p text_pos)
 	Caching intermediate parse states
 	~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 	
-	Traditional recursive-descent parser are slow, because of the large amount
-	of back-tracking occurs, where depending on the properties of the grammar,
-	the same fragment of the input is parsed over-and-over again. To prevent
-	this, the following section of code, implements a cache for all intermediate
-	parsing states (including the results that they have produced).
-	
-	It stores for each position of the input string the result of parsing a
-	certain non-terminal at that point of the input.
+	One way to improve the performance of back-tracking recursive-descent
+	parser is to use a cache were intermediate results are stored.
+	Because there are various caching strategies an abstract interface
+	for caching is provided. The parser struct, to be defined below, has
+	a pointer to a function that, if not NULL, is called to query the
+	cache and return a cache item. As long as the success status is
+	unknown, the cache item may not be freed from memory (during a
+	successive call to the function).
 */
 
 enum success_t { s_unknown, s_fail, s_success } ;
 
-typedef struct solution_t solution_t, *solution_p;
-
-struct solution_t 
-{
-	const char *nt;          /* The name of the non-terminal */
-	enum success_t success;  /* Could said non-terminal be parsed from position */
-	result_t result;         /* If so, what result did it produce */
-	text_pos_t sp;           /* The position (with line and column numbers) */
-	solution_p next;         /* Next solution at this location */
-};
-
 typedef struct
 {
-	solution_p *sols;        /* Array of solutions at locations */
-	longword len;            /* Length of array (equal to length of input) */
-} solutions_t, *solutions_p;
-
-void solutions_init(solutions_p solutions, text_buffer_p text_buffer)
-{
-    solutions->len = text_buffer->buffer_len;
-	solutions->sols = MALLOC_N(solutions->len+1, solution_p);
-	longword i;
-	for (i = 0; i < solutions->len+1; i++)
-		solutions->sols[i] = NULL;
-}
-
-void solutions_free(solutions_p solutions)
-{
-	longword i;
-	for (i = 0; i < solutions->len+1; i++)
-	{	solution_p sol = solutions->sols[i];
-
-		while (sol != NULL)
-		{	if (sol->result.dec != 0)
-		    	sol->result.dec(sol->result.data);
-			solution_p next_sol = sol->next;
-		    FREE(sol);
-			sol = next_sol;
-		}
-  	}
-	FREE(solutions->sols);
-}
-
-solution_p solutions_find(solutions_p solutions, longword pos, const char *nt)
-{
-	solution_p sol;
-
-	if (pos > solutions->len)
-		pos = solutions->len;
-
-	for (sol = solutions->sols[pos]; sol != NULL; sol = sol->next)
-		if (sol->nt == nt)
-		 	return sol;
-
-	sol = MALLOC(solution_t);
-	sol->next = solutions->sols[pos];
-	sol->nt = nt;
-	sol->success = s_unknown;
-	result_init(&sol->result);
-	solutions->sols[pos] = sol;
-
-	return sol;
-}
-
+	enum success_t success;  /* Could said non-terminal be parsed from position */
+	result_t result;         /* If so, what result did it produce */
+	text_pos_t next_pos;     /* and from which position (with line and column numbers) should parsing continue */
+} cache_item_t, *cache_item_p;
 
 /*
-	Recursive decent parser
-	~~~~~~~~~~~~~~~~~~~~~~~
+	For debugging the parser
+	~~~~~~~~~~~~~~~~~~~~~~~~
 */
 
 int depth = 0;
@@ -687,34 +644,40 @@ bool debug_nt = FALSE;
 #define DEBUG_(X)  if (debug_parse) printf(X)
 #define DEBUG_P1(X,A) if (debug_parse) printf(X,A)
 
-#define DECL_RESULT(V) result_t V; result_init(&V);
-#define DISP_RESULT(V) result_release(&V);
+
+/*
+	Parser struct definition
+	~~~~~~~~~~~~~~~~~~~~~~~~
+*/
+
 
 typedef struct
 {
 	text_buffer_p text_buffer;
-	solutions_t solutions;
 	const char *current_nt;
-	element_p current_element;
+	cache_item_p (*cache_hit_function)(void *cache, longword pos, const char *nt);
+	void *cache;
 } parser_t, *parser_p;
 
 void parser_init(parser_p parser, text_buffer_p text_buffer)
 {
 	parser->text_buffer = text_buffer;
-	solutions_init(&parser->solutions, text_buffer);
 	parser->current_nt = NULL;
-	parser->current_element = NULL;
+	parser->cache_hit_function = NULL;
+	parser->cache = NULL;
 }
 
-void parser_fini(parser_p parser)
-{
-	solutions_free(&parser->solutions);
-}
+/*
+	Parsing functions
+	~~~~~~~~~~~~~~~~~
+	
+	The parsing functions are described top-down, starting with the function
+	to parse a non-terminal, which is the top-level function to be called to
+	parse a text buffer.
+	
+*/
 
-
-bool parse_element(parser_p parser, element_p element, const result_p prev_result, end_function_p end_function, result_p rule_result);
-bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, end_function_p end_function, result_p result);
-
+bool parse_rule(parser_p parser, element_p element, const result_p prev_result, end_function_p end_function, result_p rule_result);
 
 bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 {
@@ -722,20 +685,29 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 
 	DEBUG_ENTER_P1("parse_nt(%s)", nt); DEBUG_NL;
 
-	solution_p sol = solutions_find(&parser->solutions, parser->text_buffer->pos.pos, nt);
-	if (sol->success == s_success)
+	/* First try the cache (if available) */
+	cache_item_p cache_item = NULL;
+	if (parser->cache_hit_function != NULL)
 	{
-		DEBUG_EXIT_P1("parse_nt(%s) SUCCESS", nt);  DEBUG_NL;
-		result_assign(result, &sol->result);
-		text_buffer_set_pos(parser->text_buffer, &sol->sp);
-		return TRUE;
+		cache_item = parser->cache_hit_function(parser->cache, parser->text_buffer->pos.pos, nt);
+		if (cache_item != NULL)
+		{
+			if (cache_item->success == s_success)
+			{
+				DEBUG_EXIT_P1("parse_nt(%s) SUCCESS", nt);  DEBUG_NL;
+				result_assign(result, &cache_item->result);
+				text_buffer_set_pos(parser->text_buffer, &cache_item->next_pos);
+				return TRUE;
+			}
+			else if (cache_item->success == s_fail)
+			{
+				DEBUG_EXIT_P1("parse_nt(%s) FAIL", nt);  DEBUG_NL;
+				return FALSE;
+			}
+		}
 	}
-	else if (sol->success == s_fail)
-	{
-		DEBUG_EXIT_P1("parse_nt(%s) FAIL", nt);  DEBUG_NL;
-		return FALSE;
-	}
-
+	
+	/* Set current non-terminal on parser */
 	const char *surr_nt = parser->current_nt;
 	parser->current_nt = nt;
 
@@ -745,33 +717,41 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 		depth += 2; 
 	}
 
+	/* Try the normal alternatives in order of declaration */
 	alternative_p alternative;
 	for (alternative = non_term->first; alternative != NULL; alternative = alternative->next )
 	{
 		DECL_RESULT(start)
-		if (parse_element(parser, alternative->rule, &start, alternative->end_function, result))
+		if (parse_rule(parser, alternative->rule, &start, alternative->end_function, result))
 			break;
 	}
 	
 	if (alternative == NULL)
 	{
+		/* No alternative was succesful */
 		DEBUG_EXIT_P1("parse_nt(%s) - failed", nt);  DEBUG_NL;
 		if (debug_nt)
 		{   depth -= 2;
 			printf("%*.*s", depth, depth, "");
 			printf("Failed: %s\n", nt);
 		}
+		
+		/* Restore current non-terminal to its previous value */
 		parser->current_nt = surr_nt;
-		sol->success = s_fail;
+		
+		/* Update the cache item, if available */
+		if (cache_item != NULL)
+			cache_item->success = s_fail;
 		return FALSE;
 	}
 	
+	/* Now that a normal alternative was succesfull, repeatingly try left-recursive alternatives */
 	for(;;)
 	{
-		for ( alternative = non_term->recursive; alternative != NULL; alternative = alternative->next )
+		for (alternative = non_term->recursive; alternative != NULL; alternative = alternative->next)
 		{
 			DECL_RESULT(rule_result)
-			if (parse_element(parser, alternative->rule, result, alternative->end_function, &rule_result))
+			if (parse_rule(parser, alternative->rule, result, alternative->end_function, &rule_result))
 			{   
 				result_assign(result, &rule_result);
 				DISP_RESULT(rule_result)
@@ -791,11 +771,159 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 		printf("%*.*s", depth, depth, "");
 		printf("Parsed: %s\n", nt);
 	}
+	
+	/* Restore current non-terminal to its previous value */
 	parser->current_nt = surr_nt;
-	result_assign(&sol->result, result);
-	sol->success = s_success;
-	sol->sp = parser->text_buffer->pos;
+	
+	/* Update the cache item, if available */
+	if (cache_item != NULL)
+	{
+		result_assign(&cache_item->result, result);
+		cache_item->success = s_success;
+		cache_item->next_pos = parser->text_buffer->pos;
+	}
 	return TRUE;
+}
+
+/*
+	Parsing a rule
+	~~~~~~~~~~~~~~
+	
+	This function is called to parse (the remainder of) a rule. If it fails,
+	the current position in text buffer is reset to the position it was at
+	the start of the call. This function first tries to parse the first
+	element of the rule. If this is succeeds, the function will be called
+	recursively for the rest of the rule.
+	
+*/
+
+bool parse_part(parser_p parser, element_p element, const result_p prev_result, result_p result);
+bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, end_function_p end_function, result_p result);
+
+bool parse_rule(parser_p parser, element_p element, const result_p prev_result, end_function_p end_function, result_p rule_result)
+{
+	DEBUG_ENTER("parse_rule: ");
+	DEBUG_PR(element); DEBUG_NL;
+
+	if (element == NULL)
+	{
+		/* At the end of the rule: */
+		if (end_function != 0)
+			end_function(prev_result, rule_result);
+		else
+			result_assign(rule_result, prev_result);
+		DEBUG_EXIT("parse_rule = ");
+		DEBUG_PT(rule_result); DEBUG_NL;
+		return TRUE;
+	}
+
+	/* Store the current position */
+	text_pos_t sp;
+	sp = parser->text_buffer->pos;
+	
+	/* If the first element is optional and should be avoided, first an attempt
+	   will be made to skip the element and parse the remainder of the rule */
+	if (element->optional && element->avoid)
+	{
+		DECL_RESULT(skip_result);
+		if (element->add_skip_function != NULL)
+		{
+			element->add_skip_function(prev_result, &skip_result);
+		}
+		else if (element->add_function != NULL)
+		{
+			DECL_RESULT(empty);
+			element->add_function(prev_result, &empty, &skip_result);
+			DISP_RESULT(empty);
+		}
+		else
+			result_assign(&skip_result, prev_result);
+			
+		if (parse_rule(parser, element->next, &skip_result, end_function, rule_result))
+		{
+			DISP_RESULT(skip_result);
+            DEBUG_EXIT("parse_rule = ");
+            DEBUG_PT(rule_result); DEBUG_NL;
+			return TRUE;
+		}
+		DISP_RESULT(skip_result);
+	}
+		
+	DECL_RESULT(part_result);
+	if (element->sequence)
+	{
+		/* The first element of the fule is a sequence */
+		DECL_RESULT(seq_begin);
+		if (element->begin_seq_function != NULL)
+			element->begin_seq_function(prev_result, &seq_begin);
+		
+		/* Try to parse the first element of the sequence */
+		DECL_RESULT(seq_elem);
+		if (parse_part(parser, element, &seq_begin, &seq_elem))
+		{
+			/* Now parse the remainder elements of the sequence */
+			if (parse_seq(parser, element, &seq_elem, prev_result, end_function, rule_result))
+			{
+				DISP_RESULT(seq_elem);
+				DISP_RESULT(seq_begin);
+				DEBUG_EXIT("parse_rule = ");
+				DEBUG_PT(rule_result); DEBUG_NL;
+				return TRUE;
+			}
+		}
+		DISP_RESULT(seq_begin);
+		DISP_RESULT(seq_elem);
+	}
+	else
+	{
+		/* The first element is not a sequence: Try to parse the first element */
+		DECL_RESULT(elem);
+		if (parse_part(parser, element, prev_result, &elem))
+		{
+			if (parse_rule(parser, element->next, &elem, end_function, rule_result))
+			{
+				DISP_RESULT(elem);
+				DEBUG_EXIT("parse_rule = ");
+				DEBUG_PT(rule_result); DEBUG_NL;
+				return TRUE;
+			}
+		}
+		DISP_RESULT(elem);
+	}
+	
+	/* The element was optional (and should not be avoided): Skip the element
+	   and try to parse the remainder of the rule */
+	if (element->optional && !element->avoid)
+	{
+		DECL_RESULT(skip_result);
+		if (element->add_skip_function != NULL)
+		{
+			element->add_skip_function(prev_result, &skip_result);
+		}
+		else if (element->add_function != NULL)
+		{
+			DECL_RESULT(empty);
+			element->add_function(prev_result, &empty, &skip_result);
+			DISP_RESULT(empty);
+		}
+		else
+			result_assign(&skip_result, prev_result);
+			
+		if (parse_rule(parser, element->next, &skip_result, end_function, rule_result))
+		{
+			DISP_RESULT(skip_result);
+            DEBUG_EXIT("parse_rule = ");
+            DEBUG_PT(rule_result); DEBUG_NL;
+			return TRUE;
+		}
+		DISP_RESULT(skip_result);
+	}
+
+	/* Failed to parse the rule: reset the current position to the saved position. */
+	text_buffer_set_pos(parser->text_buffer, &sp);
+	
+    DEBUG_EXIT("parse_rule: failed"); DEBUG_NL;
+	return FALSE;
 }
 
 bool parse_grouping(parser_p parser, alternative_p alternative, result_p result)
@@ -806,7 +934,7 @@ bool parse_grouping(parser_p parser, alternative_p alternative, result_p result)
 	for ( ; alternative != NULL; alternative = alternative->next )
 	{
 		DECL_RESULT(start);
-		if (parse_element(parser, alternative->rule, &start, alternative->end_function, result))
+		if (parse_rule(parser, alternative->rule, &start, alternative->end_function, result))
 		{
 			DISP_RESULT(start);
 			DEBUG_EXIT("parse_grouping = ");
@@ -908,118 +1036,6 @@ bool parse_part(parser_p parser, element_p element, const result_p prev_result, 
 	return TRUE;
 }
 
-bool parse_element(parser_p parser, element_p element, const result_p prev_result, end_function_p end_function, result_p rule_result)
-{
-	DEBUG_ENTER("parse_element: ");
-	DEBUG_PR(element); DEBUG_NL;
-
-	/* At the end of the rule: */
-	if (element == NULL)
-	{   if (end_function != 0)
-			end_function(prev_result, rule_result);
-		else
-			result_assign(rule_result, prev_result);
-		DEBUG_EXIT("parse_element = ");
-		DEBUG_PT(rule_result); DEBUG_NL;
-		return TRUE;
-	}
-
-	text_pos_t sp;
-	sp = parser->text_buffer->pos;
-	
-
-	if (element->optional && element->avoid)
-	{
-		DECL_RESULT(skip_result);
-		if (element->add_skip_function != NULL)
-		{
-			element->add_skip_function(prev_result, &skip_result);
-		}
-		else if (element->add_function != NULL)
-		{
-			DECL_RESULT(empty);
-			element->add_function(prev_result, &empty, &skip_result);
-			DISP_RESULT(empty);
-		}
-		else
-			result_assign(&skip_result, prev_result);
-		if (parse_element(parser, element->next, &skip_result, end_function, rule_result))
-		{
-			DISP_RESULT(skip_result);
-            DEBUG_EXIT("parse_element = ");
-            DEBUG_PT(rule_result); DEBUG_NL;
-			return TRUE;
-		}
-		DISP_RESULT(skip_result);
-	}
-		
-	DECL_RESULT(part_result);
-	if (element->sequence)
-	{
-		DECL_RESULT(seq_begin);
-		if (element->begin_seq_function != NULL)
-			element->begin_seq_function(prev_result, &seq_begin);
-		DECL_RESULT(seq_elem);
-		if (parse_part(parser, element, &seq_begin, &seq_elem))
-		{
-			if (parse_seq(parser, element, &seq_elem, prev_result, end_function, rule_result))
-			{
-				DISP_RESULT(seq_elem);
-				DISP_RESULT(seq_begin);
-				DEBUG_EXIT("parse_element = ");
-				DEBUG_PT(rule_result); DEBUG_NL;
-				return TRUE;
-			}
-		}
-		DISP_RESULT(seq_begin);
-		DISP_RESULT(seq_elem);
-	}
-	else
-	{
-		DECL_RESULT(elem);
-		if (parse_part(parser, element, prev_result, &elem))
-		{
-			if (parse_element(parser, element->next, &elem, end_function, rule_result))
-			{
-				DISP_RESULT(elem);
-				DEBUG_EXIT("parse_element = ");
-				DEBUG_PT(rule_result); DEBUG_NL;
-				return TRUE;
-			}
-		}
-		DISP_RESULT(elem);
-	}
-				
-	if (element->optional && !element->avoid)
-	{
-		DECL_RESULT(skip_result);
-		if (element->add_skip_function != NULL)
-		{
-			element->add_skip_function(prev_result, &skip_result);
-		}
-		else if (element->add_function != NULL)
-		{
-			DECL_RESULT(empty);
-			element->add_function(prev_result, &empty, &skip_result);
-			DISP_RESULT(empty);
-		}
-		else
-			result_assign(&skip_result, prev_result);
-		if (parse_element(parser, element->next, &skip_result, end_function, rule_result))
-		{
-			DISP_RESULT(skip_result);
-            DEBUG_EXIT("parse_element = ");
-            DEBUG_PT(rule_result); DEBUG_NL;
-			return TRUE;
-		}
-		DISP_RESULT(skip_result);
-	}
-
-	text_buffer_set_pos(parser->text_buffer, &sp);
-	
-    DEBUG_EXIT("parse_element: failed"); DEBUG_NL;
-	return FALSE;
-}
 
 bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, end_function_p end_function, result_p rule_result)
 {
@@ -1028,7 +1044,7 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 		DECL_RESULT(result);
 		if (element->add_seq_function != NULL)
 			element->add_seq_function(prev, prev_seq, &result);
-		if (parse_element(parser, element->next, &result, end_function, rule_result))
+		if (parse_rule(parser, element->next, &result, end_function, rule_result))
 		{
 			DISP_RESULT(result);
 			return TRUE;
@@ -1039,7 +1055,7 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 	if (element->chain_rule != NULL)
 	{
 		DECL_RESULT(dummy_chain_elem);
-		if (!parse_element(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem))
+		if (!parse_rule(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem))
 		{
 			DISP_RESULT(dummy_chain_elem);
 			return FALSE;
@@ -1053,7 +1069,7 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 		if (parse_seq(parser, element, &seq_elem, prev, end_function, rule_result))
 		{
 			DISP_RESULT(seq_elem);
-			DEBUG_EXIT("parse_element = ");
+			DEBUG_EXIT("parse_rule = ");
 			DEBUG_PT(rule_result); DEBUG_NL;
 			return TRUE;
 		}
@@ -1065,7 +1081,7 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 		DECL_RESULT(result);
 		if (element->add_seq_function != NULL)
 			element->add_seq_function(prev, prev_seq, &result);
-		if (parse_element(parser, element->next, &result, end_function, rule_result))
+		if (parse_rule(parser, element->next, &result, end_function, rule_result))
 		{
 			DISP_RESULT(result);
 			return TRUE;
@@ -1077,13 +1093,93 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 }
 
 
+/*
+	Brute force cache
+	~~~~~~~~~~~~~~~~~
+	
+	A simple cache implementation, is one that simply stores all results for
+	all positions in the input text.
+
+*/
+
+typedef struct solution *solution_p;
+struct solution
+{
+	cache_item_t cache_item;
+	const char *nt;
+	solution_p next;
+};
+typedef struct
+{
+	solution_p *sols;        /* Array of solutions at locations */
+	longword len;            /* Length of array (equal to length of input) */
+} solutions_t, *solutions_p;
+
+
+void solutions_init(solutions_p solutions, text_buffer_p text_buffer)
+{
+    solutions->len = text_buffer->buffer_len;
+	solutions->sols = MALLOC_N(solutions->len+1, solution_p);
+	longword i;
+	for (i = 0; i < solutions->len+1; i++)
+		solutions->sols[i] = NULL;
+}
+
+void solutions_free(solutions_p solutions)
+{
+	longword i;
+	for (i = 0; i < solutions->len+1; i++)
+	{	solution_p sol = solutions->sols[i];
+
+		while (sol != NULL)
+		{	if (sol->cache_item.result.dec != 0)
+		    	sol->cache_item.result.dec(sol->cache_item.result.data);
+			solution_p next_sol = sol->next;
+		    FREE(sol);
+			sol = next_sol;
+		}
+  	}
+	FREE(solutions->sols);
+}
+
+cache_item_p solutions_find(void *cache, longword pos, const char *nt)
+{
+	solutions_p solutions = (solutions_p)cache;
+	solution_p sol;
+
+	if (pos > solutions->len)
+		pos = solutions->len;
+
+	for (sol = solutions->sols[pos]; sol != NULL; sol = sol->next)
+		if (sol->nt == nt)
+		 	return &sol->cache_item;
+
+	sol = MALLOC(struct solution);
+	sol->next = solutions->sols[pos];
+	sol->nt = nt;
+	sol->cache_item.success = s_unknown;
+	result_init(&sol->cache_item.result);
+	solutions->sols[pos] = sol;
+	return &sol->cache_item;
+}
+
+/*
+	White space tests
+	~~~~~~~~~~~~~~~~~
+*/
+
 void test_parse_white_space(non_terminal_p *all_nt, const char *input)
 {
 	text_buffer_t text_buffer;
 	text_buffer_assign_string(&text_buffer, input);
 	
+	solutions_t solutions;
+	solutions_init(&solutions, &text_buffer);
+	
 	parser_t parser;
 	parser_init(&parser, &text_buffer);
+	parser.cache_hit_function = solutions_find;
+	parser.cache = &solutions;
 	
 	DECL_RESULT(result);
 	if (parse_nt(&parser, find_nt("white_space", all_nt), &result) && text_buffer_end(&text_buffer))
@@ -1094,6 +1190,8 @@ void test_parse_white_space(non_terminal_p *all_nt, const char *input)
 	{
 		fprintf(stderr, "ERROR: failed to parse white space from '%s'\n", input);
 	}
+	
+	solutions_free(&solutions);
 }
 
 void test_white_space_grammar(non_terminal_p *all_nt)
@@ -1102,13 +1200,23 @@ void test_white_space_grammar(non_terminal_p *all_nt)
 	test_parse_white_space(all_nt, "/* */");
 }
 
+/*
+	Number tests
+	~~~~~~~~~~~~
+*/
+
 void test_parse_number(non_terminal_p *all_nt, const char *input, int num)
 {
 	text_buffer_t text_buffer;
 	text_buffer_assign_string(&text_buffer, input);
 	
+	solutions_t solutions;
+	solutions_init(&solutions, &text_buffer);
+	
 	parser_t parser;
 	parser_init(&parser, &text_buffer);
+	parser.cache_hit_function = solutions_find;
+	parser.cache = &solutions;
 	
 	DECL_RESULT(result);
 	if (parse_nt(&parser, find_nt("number", all_nt), &result) && text_buffer_end(&text_buffer))
@@ -1125,7 +1233,7 @@ void test_parse_number(non_terminal_p *all_nt, const char *input, int num)
 		fprintf(stderr, "ERROR: failed to parse number from '%s'\n", input);
 	DISP_RESULT(result);
 
-	parser_fini(&parser);
+	solutions_free(&solutions);
 }
 
 void test_number_grammar(non_terminal_p *all_nt)
