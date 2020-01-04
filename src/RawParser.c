@@ -808,10 +808,13 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 	if (element == NULL)
 	{
 		/* At the end of the rule: */
-		if (end_function != 0)
-			end_function(prev_result, rule_result);
-		else
+		if (end_function == 0)
 			result_assign(rule_result, prev_result);
+		else if (!end_function(prev_result, rule_result))
+		{
+			DEBUG_EXIT("parse_rule failed by end function "); DEBUG_NL;
+			return FALSE;
+		}
 		DEBUG_EXIT("parse_rule = ");
 		DEBUG_PT(rule_result); DEBUG_NL;
 		return TRUE;
@@ -828,12 +831,23 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 		DECL_RESULT(skip_result);
 		if (element->add_skip_function != NULL)
 		{
-			element->add_skip_function(prev_result, &skip_result);
+			if (!element->add_skip_function(prev_result, &skip_result))
+			{
+				DISP_RESULT(skip_result);
+	            DEBUG_EXIT("parse_rule failed due to add skip function"); DEBUG_NL;
+				return FALSE;
+			}
 		}
 		else if (element->add_function != NULL)
 		{
 			DECL_RESULT(empty);
-			element->add_function(prev_result, &empty, &skip_result);
+			if (!element->add_function(prev_result, &empty, &skip_result))
+			{
+				DISP_RESULT(empty);
+				DISP_RESULT(skip_result);
+	            DEBUG_EXIT("parse_rule failed due to add function"); DEBUG_NL;
+				return FALSE;
+			}
 			DISP_RESULT(empty);
 		}
 		else
@@ -898,12 +912,23 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 		DECL_RESULT(skip_result);
 		if (element->add_skip_function != NULL)
 		{
-			element->add_skip_function(prev_result, &skip_result);
+			if (!element->add_skip_function(prev_result, &skip_result))
+			{
+				DISP_RESULT(skip_result);
+	            DEBUG_EXIT("parse_rule failed due to add skip function"); DEBUG_NL;
+				return FALSE;
+			}
 		}
 		else if (element->add_function != NULL)
 		{
 			DECL_RESULT(empty);
-			element->add_function(prev_result, &empty, &skip_result);
+			if (!element->add_function(prev_result, &empty, &skip_result))
+			{
+				DISP_RESULT(empty);
+				DISP_RESULT(skip_result);
+	            DEBUG_EXIT("parse_rule failed due to add function"); DEBUG_NL;
+				return FALSE;
+			}
 			DISP_RESULT(empty);
 		}
 		else
@@ -926,37 +951,24 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 	return FALSE;
 }
 
-bool parse_grouping(parser_p parser, alternative_p alternative, result_p result)
-{
-	DEBUG_ENTER("parse_grouping: ");
-	DEBUG_PO(alternative); DEBUG_NL;
-
-	for ( ; alternative != NULL; alternative = alternative->next )
-	{
-		DECL_RESULT(start);
-		if (parse_rule(parser, alternative->rule, &start, alternative->end_function, result))
-		{
-			DISP_RESULT(start);
-			DEBUG_EXIT("parse_grouping = ");
-			DEBUG_PT(result); DEBUG_NL;
-			return TRUE;
-		}
-		DISP_RESULT(start);
-	}
-	DEBUG_EXIT("parse_grouping: failed"); DEBUG_NL;
-	return FALSE;
-}
-
+/*
+	Parse part of an element
+	~~~~~~~~~~~~~~~~~~~~~~~~
+	
+	The following function is used to parse a part of an element, not dealing
+	with if the element is optional or a sequence.
+*/
 
 bool parse_part(parser_p parser, element_p element, const result_p prev_result, result_p result)
 {
+	/* Store the current position */
 	text_pos_t sp = parser->text_buffer->pos;
 
-	bool accepted = FALSE;
 	switch( element->kind )
 	{
 		case rk_nt:
 			{
+				/* Parse the non-terminal */
 				DECL_RESULT(nt_result)
 				if (!parse_nt(parser, element->info.non_terminal, &nt_result))
 				{
@@ -964,12 +976,15 @@ bool parse_part(parser_p parser, element_p element, const result_p prev_result, 
 					return FALSE;
 				}
 				
+				/* If there is a condition, evaluate the result */
 				if (element->condition != 0 && !(*element->condition)(&nt_result, element->condition_argument))
 				{
 					DISP_RESULT(nt_result)
 					text_buffer_set_pos(parser->text_buffer, &sp);
 					return FALSE;
-				}				
+				}
+				
+				/* Combine the result with the previous result */
 				if (element->add_function == 0)
 					result_assign(result, prev_result);
 				else if (!(*element->add_function)(prev_result, &nt_result, result))
@@ -983,12 +998,27 @@ bool parse_part(parser_p parser, element_p element, const result_p prev_result, 
 			break;
 		case rk_grouping:
 			{
+				/* Try all alternatives in the grouping */
 				DECL_RESULT(grouping_result);
-				if (!parse_grouping(parser, element->info.alternative, &grouping_result))
+				alternative_p alternative = element->info.alternative;
+				for ( ; alternative != NULL; alternative = alternative->next )
 				{
+					DECL_RESULT(start);
+					if (parse_rule(parser, alternative->rule, &start, alternative->end_function, result))
+					{
+						DISP_RESULT(start);
+						break;
+					}
+					DISP_RESULT(start);
+				}
+				if (alternative == NULL)
+				{
+					/* Non of the alternatives worked */
 					DISP_RESULT(grouping_result)
 					return FALSE;
 				}
+				
+				/* Combine the result of the alternative with the previous result */
 				if (element->add_function == 0)
 					result_assign(result, prev_result);
 				else if (!(*element->add_function)(prev_result, &grouping_result, result))
@@ -1001,25 +1031,32 @@ bool parse_part(parser_p parser, element_p element, const result_p prev_result, 
 			}
 			break;
 		case rk_end:
+			/* Check if the end of the buffer is reached */
 			if (!text_buffer_end(parser->text_buffer))
 				return FALSE;
 			result_assign(result, prev_result);
 			break;
 		case rk_char:
+			/* Check if the specified character is found at the current position in the text buffer */
 			if (*parser->text_buffer->info != element->info.ch)
 				return FALSE;
+			/* Advance the current position of the text buffer */
 			text_buffer_next(parser->text_buffer);
+			/* Process the character */
 			if (element->add_char_function == 0)
 				result_assign(result, prev_result);
 			else if (!(*element->add_char_function)(prev_result, element->info.ch, result))
 				return FALSE;
 			break;
 		case rk_charset:
+			/* Check if the character at the current position in the text buffer is found in the character set */
 			if (!char_set_contains(element->info.char_set, *parser->text_buffer->info))
 				return FALSE;
 			{
+				/* Remember the character and advance the current position of the text buffer */
 				char ch = *parser->text_buffer->info;
 				text_buffer_next(parser->text_buffer);
+				/* Process the character */
 				if (element->add_char_function == 0)
 					result_assign(result, prev_result);
 				else if (!(*element->add_char_function)(prev_result, ch, result))
@@ -1030,6 +1067,8 @@ bool parse_part(parser_p parser, element_p element, const result_p prev_result, 
 			return FALSE;
 			break;
 	}
+	
+	/* Set the position on the result */
 	if (element->set_pos != NULL)
 		element->set_pos(result, &sp);
 
@@ -1042,8 +1081,11 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 	if (element->avoid)
 	{
 		DECL_RESULT(result);
-		if (element->add_seq_function != NULL)
-			element->add_seq_function(prev, prev_seq, &result);
+		if (element->add_seq_function != NULL && !element->add_seq_function(prev, prev_seq, &result))
+		{
+			DISP_RESULT(result);
+			return FALSE;
+		}
 		if (parse_rule(parser, element->next, &result, end_function, rule_result))
 		{
 			DISP_RESULT(result);
@@ -1079,8 +1121,12 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 	if (!element->avoid)
 	{
 		DECL_RESULT(result);
-		if (element->add_seq_function != NULL)
-			element->add_seq_function(prev, prev_seq, &result);
+		if (element->add_seq_function != NULL && !element->add_seq_function(prev, prev_seq, &result))
+		{
+			DISP_RESULT(result);
+			return FALSE;
+		}
+		
 		if (parse_rule(parser, element->next, &result, end_function, rule_result))
 		{
 			DISP_RESULT(result);
