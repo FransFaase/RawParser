@@ -163,22 +163,36 @@ alternative_p new_alternative()
 	return alternative;
 }
 
-/*  Defintion of an element of a rule  */
+/*  
+	Defintion of an element of a rule.
 
-enum element_kind_t { rk_nt, rk_grouping, rk_char, rk_charset, rk_end };
+	(Some members of the element struct will be explained below.)	
+*/
+
+enum element_kind_t
+{
+	rk_nt,       /* A non-terminal */
+	rk_grouping, /* Grouping of one or more alternatives */
+	rk_char,     /* A character */
+	rk_charset,  /* A character set */
+	rk_end,      /* End of input */
+	rk_term      /* User defined terimal scan function */
+};
 
 struct element
 {
-	enum element_kind_t kind;
-	bool optional;
-	bool sequence;
-	bool avoid;
-	element_p chain_rule;
+	enum element_kind_t kind;   /* Kind of element */
+	bool optional;              /* Whether the element is optional */
+	bool sequence;              /* Whether the element is a sequenct */
+	bool avoid;                 /* Whether the elmennt should be avoided when it is optional and/or sequential */
+	element_p chain_rule;       /* Chain rule, for between the sequential elements */
 	union 
-	{   non_terminal_p non_terminal;
-		alternative_p alternative;
-		char ch;
-		char_set_p char_set;
+	{   non_terminal_p non_terminal; /* rk_nt: Pointer to non-terminal */
+		alternative_p alternative;   /* rk_grouping: Pointer to the alternatives */
+		char ch;                     /* rk_char: The character */
+		char_set_p char_set;         /* rk_charset: Pointer to character set definition */
+		const char *(*terminal_function)(const char *input, result_p result);
+		                             /* rk_term: Pointer to user defined terminal scan function */
 	} info;
 	bool (*condition)(result_p result, const void *argument);
 	const void *condition_argument;
@@ -447,15 +461,26 @@ bool debug_allocations = FALSE;
 typedef struct
 {
 	unsigned long cnt;
+	void (*release)(void *);
 } ref_counted_base_t, *ref_counted_base_p;
 
 void ref_counted_base_inc(void *data) { ((ref_counted_base_p)data)->cnt++; }
-void ref_counted_base_dec(void *data) { if (--((ref_counted_base_p)data)->cnt == 0) { if (debug_allocations) fprintf(stderr, "Free %p\n", data); FREE(data);} }
+void ref_counted_base_dec(void *data)
+{
+	if (--((ref_counted_base_p)data)->cnt == 0)
+	{
+		if (debug_allocations) fprintf(stderr, "Free %p\n", data);
+		if (((ref_counted_base_p)data)->release != NULL)
+			((ref_counted_base_p)data)->release(data);
+		FREE(data);
+	}
+}
 
 void result_assign_ref_counted(result_p result, void *data)
 {
 	if (debug_allocations) fprintf(stderr, "Allocated %p\n", data);
 	((ref_counted_base_p)data)->cnt = 1;
+	((ref_counted_base_p)data)->release = NULL;
 	result->data = data;
 	result->inc = ref_counted_base_inc;
 	result->dec = ref_counted_base_dec;
@@ -828,6 +853,11 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 	   will be made to skip the element and parse the remainder of the rule */
 	if (element->optional && element->avoid)
 	{
+		/* If a add skip function is defined, apply it. (A add skip function
+		   can be used to process the absence of the element with the result.)
+		   Otherwise, if a add function is defined, it will be called with an
+		   'empty' result, signaling that there no element was parsed.
+		   Otherwise, the previous result is used. */
 		DECL_RESULT(skip_result);
 		if (element->add_skip_function != NULL)
 		{
@@ -866,16 +896,16 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 	DECL_RESULT(part_result);
 	if (element->sequence)
 	{
-		/* The first element of the fule is a sequence */
+		/* The first element of the fule is a sequence. */
 		DECL_RESULT(seq_begin);
 		if (element->begin_seq_function != NULL)
 			element->begin_seq_function(prev_result, &seq_begin);
 		
-		/* Try to parse the first element of the sequence */
+		/* Try to parse the first element of the sequence. */
 		DECL_RESULT(seq_elem);
 		if (parse_part(parser, element, &seq_begin, &seq_elem))
 		{
-			/* Now parse the remainder elements of the sequence */
+			/* Now parse the remainder elements of the sequence (and thereafter the remainder of the rule. */
 			if (parse_seq(parser, element, &seq_elem, prev_result, end_function, rule_result))
 			{
 				DISP_RESULT(seq_elem);
@@ -1063,6 +1093,18 @@ bool parse_part(parser_p parser, element_p element, const result_p prev_result, 
 					return FALSE;
 			}
 			break;
+		case rk_term:
+			/* Call the terminal parse function and see if it has parsed something */
+			{
+				const char *next_pos = element->info.terminal_function(parser->text_buffer->info, result);
+				/* If the start position is returned, assume that it failed. */
+				if (next_pos <= parser->text_buffer->info)
+					return FALSE;
+				/* Increment the buffer till the returned position */
+				while (parser->text_buffer->info < next_pos)
+					text_buffer_next(parser->text_buffer);
+			}
+			break;
 		default:
 			return FALSE;
 			break;
@@ -1078,6 +1120,8 @@ bool parse_part(parser_p parser, element_p element, const result_p prev_result, 
 
 bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, end_function_p end_function, result_p rule_result)
 {
+	/* In case of the avoid modifier, first an attempt is made to parse the
+	   remained of the rule */
 	if (element->avoid)
 	{
 		DECL_RESULT(result);
@@ -1094,30 +1138,48 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 		DISP_RESULT(result);
 	}
 	
+	/* If a chain rule is defined, try to parse it.*/
 	if (element->chain_rule != NULL)
 	{
 		DECL_RESULT(dummy_chain_elem);
-		if (!parse_rule(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem))
+		if (parse_rule(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem))
 		{
+			/* If the chain rule was succesful, an element should follow. */
 			DISP_RESULT(dummy_chain_elem);
+			DECL_RESULT(seq_elem);
+			if (parse_part(parser, element, prev_seq, &seq_elem))
+			{
+				/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
+				if (parse_seq(parser, element, &seq_elem, prev, end_function, rule_result))
+				{
+					DISP_RESULT(seq_elem);
+					return TRUE;
+				}
+			}
+			DISP_RESULT(seq_elem);
 			return FALSE;
 		}
 		DISP_RESULT(dummy_chain_elem);
 	}
-
-	DECL_RESULT(seq_elem);
-	if (parse_part(parser, element, prev_seq, &seq_elem))
+	else
 	{
-		if (parse_seq(parser, element, &seq_elem, prev, end_function, rule_result))
+		/* Try to parse the next element of the sequence */
+		DECL_RESULT(seq_elem);
+		if (parse_part(parser, element, prev_seq, &seq_elem))
 		{
-			DISP_RESULT(seq_elem);
-			DEBUG_EXIT("parse_rule = ");
-			DEBUG_PT(rule_result); DEBUG_NL;
-			return TRUE;
+			/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
+			if (parse_seq(parser, element, &seq_elem, prev, end_function, rule_result))
+			{
+				DISP_RESULT(seq_elem);
+				return TRUE;
+			}
 		}
+		DISP_RESULT(seq_elem);
 	}
-	DISP_RESULT(seq_elem);
 	
+	/* In case of the avoid modifier, an attempt to parse the remained of the
+	   rule, was already made. So, only in case of no avoid modifier, attempt
+	   to parse the remainder of the rule */
 	if (!element->avoid)
 	{
 		DECL_RESULT(result);
@@ -1303,218 +1365,77 @@ int main(int argc, char *argv[])
 	return 0;
 }
 
+/*
+	Abstract Syntax Tree
+	~~~~~~~~~~~~~~~~~~~~
+	The following section of the code implements
+	a representation for Abstract Syntax Trees.
+*/
+
+typedef struct
+{
+	ref_counted_base_t _base;
+	const char *type_name;
+	word line;
+	word column;
+} tree_node_t, *tree_node_p;
+
+typedef struct tree_t *tree_p;
+struct tree_t
+{
+	tree_node_t _node;
+	word nr_children;
+	result_t *children;
+};
+
+tree_p old_trees = NULL;
+long alloced_trees = 0L;
+
+void release_tree( void *data )
+{
+	tree_p tree = (tree_p)data;;
+
+	alloced_trees--;
+
+	if (tree->nr_children > 0)
+	{
+		for (int i = 0; i < tree->nr_children; i++)
+			result_release(&tree->children[i]);
+		free(tree->children);
+	}
+	*(tree_p*)tree = old_trees;
+	old_trees = tree;
+}
+
+tree_p malloc_tree(const char *name)
+{   tree_p new_tree;
+
+	if (old_trees)
+	{   new_tree = old_trees;
+		old_trees = *(tree_p*)old_trees;
+	}
+	else
+		new_tree = MALLOC(struct tree_t);
+
+	new_tree->_node._base.cnt = 1;
+	new_tree->_node._base.release = release_tree;
+	new_tree->_node.type_name = name;
+	new_tree->_node.line = 0;
+	new_tree->_node.column = 0;
+	new_tree->nr_children = 0;
+	new_tree->children = NULL;
+	
+	alloced_trees++;
+
+	return new_tree;
+}
+
 #if 0
 
 
-/*
-	A hexadecimal hash tree
-	~~~~~~~~~~~~~~~~~~~~~~~	
-	The following structure implements a mapping
-	of strings to an integer value in the range [0..254].
-	It is a tree of hashs in combination with a very
-	fast incremental hash function. In this way, it
-	tries to combine the benefits of trees and hashs.
-	The incremental hash function will first return 
-	the lower 4 bits of the characters in the string, 
-	and following this the higher 4 bits of the characters.
-*/	
-
-typedef struct hexa_hash_tree_t hexa_hash_tree_t, *hexa_hash_tree_p;
-
-struct hexa_hash_tree_t
-{	byte state;
-	union
-	{	char *string;
-		hexa_hash_tree_p *children;
-	} data;
-};
-
-byte *keyword_state = NULL;
-
-char *string(char *s)
-/* Returns a unique address representing the
-   string. the global keyword_state will point
-   to the integer value in the range [0..254].
-   If the string does not occure in the store,
-   it is added and the state is initialized with 0.
-*/
-{
-	static hexa_hash_tree_p hash_tree = NULL;
-	hexa_hash_tree_p *r_node = &hash_tree;
-	char *vs = s;
-	int depth;
-	int mode = 0;
-
-	for (depth = 0; ; depth++)
-	{   hexa_hash_tree_p node = *r_node;
-
-		if (node == NULL)
-		{   node = MALLOC(hexa_hash_tree_t);
-			node->state = 0;
-			STRCPY(node->data.string, s);
-			*r_node = node;
-			keyword_state = &node->state;
-			return node->data.string;
-		}
-
-		if (node->state != 255)
-		{   char *cs = node->data.string;
-			hexa_hash_tree_p *children;
-			word i, v = 0;
-
-			if (*cs == *s && strcmp(cs+1, s+1) == 0)
-			{   keyword_state = &node->state;
-				return node->data.string;
-			}
-
-			children = MALLOC_N(16, hexa_hash_tree_t*);
-			for (i = 0; i < 16; i++)
-				children[i] = NULL;
-
-			i = strlen(cs);
-			if (depth <= i)
-				v = ((byte)cs[depth]) & 15;
-			else if (depth <= i*2)
-				v = ((byte)cs[depth-i-1]) >> 4;
-
-			children[v] = node;
-
-			node = MALLOC(hexa_hash_tree_t);
-			node->state = 255;
-			node->data.children = children;
-			*r_node = node;
-		}
-		{   word v;
-			if (*vs == '\0')
-			{   v = 0;
-				if (mode == 0)
-				{   mode = 1;
-					vs = s;
-				}
-			}
-			else if (mode == 0)
-				v = ((word)*vs++) & 15;
-			else
-				v = ((word)*vs++) >> 4;
-
-			r_node = &node->data.children[v];
-		}
-	}
-}
 
 
 
-
-
-
-
-
-
-
-
-/*
-	Abstract Parse Trees
-	~~~~~~~~~~~~~~~~~~~~
-	The following section of the code implements
-	a representation for Abstract Parse Trees.
-*/
-
-
-
-typedef struct tree_t tree_t, *tree_p;
-typedef struct list_t list_t, *list_p;
-
-struct tree_t
-{   char *type;
-	union
-	{   list_p parts;
-		char   *str_value;
-		int	int_value;
-		double double_value;
-		char   char_value;
-	} c;
-	word line, column;
-	longword refcount;
-};
-
-struct list_t
-{   list_p next;
-	tree_p first;
-};
-
-char *tt_str_value,
-	 *tt_int_value,
-	 *tt_list;
-
-/* Special strings, one for each terminal */
-char *tt_ident = "identifier";
-char *tt_str_value = "string value";
-char *tt_int_value = "integer value";
-char *tt_double_value = "double value";
-char *tt_char_value = "char value";
-char *tt_list = "list";
-
-
-tree_p old_trees = NULL;
-list_p old_lists = NULL;
-long alloced_trees = 0;
-
-tree_p malloc_tree( void )
-{   tree_p new;
-
-	if (old_trees)
-	{   new = old_trees;
-		old_trees = (tree_p)old_trees->type;
-	}
-	else
-		new = MALLOC(tree_t);
-
-	new->line = 0;
-	new->column = 0;
-	new->refcount = 1;
-	alloced_trees++;
-
-	return new;
-} 
-
-void free_list( list_p list );
-
-bool type_can_have_parts( char *type )
-{
-	return	type != tt_ident 
-		   && type != tt_str_value
-		   && type != tt_int_value
-		   && type != tt_double_value
-		   && type != tt_char_value;
-}
-
-
-void tree_release( tree_p *r_t )
-{   tree_p t = *r_t;
-
-	if (t == NULL)
-		return;
-
-	alloced_trees--;
-	t->refcount--;
-
-	if (t->refcount == 0)
-	{
-		if (type_can_have_parts(t->type))
-		{   list_p list = t->c.parts;
-
-			while (list != NULL)
-			{   list_p next = list->next;
-				free_list(list);
-				list = next;
-			}
-		}
-
-		t->type = (char*)old_trees;
-		old_trees = t;
-	}
-	*r_t = NULL;
-}
 
 void free_list( list_p list )
 { tree_release(&list->first);
@@ -2695,5 +2616,112 @@ void out(Grammar *grammar)
 	CLOSE SEQ OPT G_EOF
 }
 #endif
+
+
+/*
+	A hexadecimal hash tree
+	~~~~~~~~~~~~~~~~~~~~~~~	
+	The following structure implements a mapping
+	of strings to an integer value in the range [0..254].
+	It is a tree of hashs in combination with a very
+	fast incremental hash function. In this way, it
+	tries to combine the benefits of trees and hashs.
+	The incremental hash function will first return 
+	the lower 4 bits of the characters in the string, 
+	and following this the higher 4 bits of the characters.
+*/	
+
+typedef struct hexa_hash_tree_t hexa_hash_tree_t, *hexa_hash_tree_p;
+
+struct hexa_hash_tree_t
+{	byte state;
+	union
+	{	char *string;
+		hexa_hash_tree_p *children;
+	} data;
+};
+
+byte *keyword_state = NULL;
+
+char *string(char *s)
+/* Returns a unique address representing the
+   string. the global keyword_state will point
+   to the integer value in the range [0..254].
+   If the string does not occure in the store,
+   it is added and the state is initialized with 0.
+*/
+{
+	static hexa_hash_tree_p hash_tree = NULL;
+	hexa_hash_tree_p *r_node = &hash_tree;
+	char *vs = s;
+	int depth;
+	int mode = 0;
+
+	for (depth = 0; ; depth++)
+	{   hexa_hash_tree_p node = *r_node;
+
+		if (node == NULL)
+		{   node = MALLOC(hexa_hash_tree_t);
+			node->state = 0;
+			STRCPY(node->data.string, s);
+			*r_node = node;
+			keyword_state = &node->state;
+			return node->data.string;
+		}
+
+		if (node->state != 255)
+		{   char *cs = node->data.string;
+			hexa_hash_tree_p *children;
+			word i, v = 0;
+
+			if (*cs == *s && strcmp(cs+1, s+1) == 0)
+			{   keyword_state = &node->state;
+				return node->data.string;
+			}
+
+			children = MALLOC_N(16, hexa_hash_tree_t*);
+			for (i = 0; i < 16; i++)
+				children[i] = NULL;
+
+			i = strlen(cs);
+			if (depth <= i)
+				v = ((byte)cs[depth]) & 15;
+			else if (depth <= i*2)
+				v = ((byte)cs[depth-i-1]) >> 4;
+
+			children[v] = node;
+
+			node = MALLOC(hexa_hash_tree_t);
+			node->state = 255;
+			node->data.children = children;
+			*r_node = node;
+		}
+		{   word v;
+			if (*vs == '\0')
+			{   v = 0;
+				if (mode == 0)
+				{   mode = 1;
+					vs = s;
+				}
+			}
+			else if (mode == 0)
+				v = ((word)*vs++) & 15;
+			else
+				v = ((word)*vs++) >> 4;
+
+			r_node = &node->data.children[v];
+		}
+	}
+}
+
+
+
+
+
+
+
+
+
+
 
 #endif
