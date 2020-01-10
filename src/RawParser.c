@@ -163,22 +163,36 @@ alternative_p new_alternative()
 	return alternative;
 }
 
-/*  Defintion of an element of a rule  */
+/*  
+	Defintion of an element of a rule.
 
-enum element_kind_t { rk_nt, rk_grouping, rk_char, rk_charset, rk_end };
+	(Some members of the element struct will be explained below.)	
+*/
+
+enum element_kind_t
+{
+	rk_nt,       /* A non-terminal */
+	rk_grouping, /* Grouping of one or more alternatives */
+	rk_char,     /* A character */
+	rk_charset,  /* A character set */
+	rk_end,      /* End of input */
+	rk_term      /* User defined terimal scan function */
+};
 
 struct element
 {
-	enum element_kind_t kind;
-	bool optional;
-	bool sequence;
-	bool avoid;
-	element_p chain_rule;
+	enum element_kind_t kind;   /* Kind of element */
+	bool optional;              /* Whether the element is optional */
+	bool sequence;              /* Whether the element is a sequenct */
+	bool avoid;                 /* Whether the elmennt should be avoided when it is optional and/or sequential */
+	element_p chain_rule;       /* Chain rule, for between the sequential elements */
 	union 
-	{   non_terminal_p non_terminal;
-		alternative_p alternative;
-		char ch;
-		char_set_p char_set;
+	{   non_terminal_p non_terminal; /* rk_nt: Pointer to non-terminal */
+		alternative_p alternative;   /* rk_grouping: Pointer to the alternatives */
+		char ch;                     /* rk_char: The character */
+		char_set_p char_set;         /* rk_charset: Pointer to character set definition */
+		const char *(*terminal_function)(const char *input, result_p result);
+		                             /* rk_term: Pointer to user defined terminal scan function */
 	} info;
 	bool (*condition)(result_p result, const void *argument);
 	const void *condition_argument;
@@ -447,15 +461,26 @@ bool debug_allocations = FALSE;
 typedef struct
 {
 	unsigned long cnt;
+	void (*release)(void *);
 } ref_counted_base_t, *ref_counted_base_p;
 
 void ref_counted_base_inc(void *data) { ((ref_counted_base_p)data)->cnt++; }
-void ref_counted_base_dec(void *data) { if (--((ref_counted_base_p)data)->cnt == 0) { if (debug_allocations) fprintf(stderr, "Free %p\n", data); FREE(data);} }
+void ref_counted_base_dec(void *data)
+{
+	if (--((ref_counted_base_p)data)->cnt == 0)
+	{
+		if (debug_allocations) fprintf(stderr, "Free %p\n", data);
+		if (((ref_counted_base_p)data)->release != NULL)
+			((ref_counted_base_p)data)->release(data);
+		FREE(data);
+	}
+}
 
 void result_assign_ref_counted(result_p result, void *data)
 {
 	if (debug_allocations) fprintf(stderr, "Allocated %p\n", data);
 	((ref_counted_base_p)data)->cnt = 1;
+	((ref_counted_base_p)data)->release = NULL;
 	result->data = data;
 	result->inc = ref_counted_base_inc;
 	result->dec = ref_counted_base_dec;
@@ -828,6 +853,11 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 	   will be made to skip the element and parse the remainder of the rule */
 	if (element->optional && element->avoid)
 	{
+		/* If a add skip function is defined, apply it. (A add skip function
+		   can be used to process the absence of the element with the result.)
+		   Otherwise, if a add function is defined, it will be called with an
+		   'empty' result, signaling that there no element was parsed.
+		   Otherwise, the previous result is used. */
 		DECL_RESULT(skip_result);
 		if (element->add_skip_function != NULL)
 		{
@@ -866,16 +896,16 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 	DECL_RESULT(part_result);
 	if (element->sequence)
 	{
-		/* The first element of the fule is a sequence */
+		/* The first element of the fule is a sequence. */
 		DECL_RESULT(seq_begin);
 		if (element->begin_seq_function != NULL)
 			element->begin_seq_function(prev_result, &seq_begin);
 		
-		/* Try to parse the first element of the sequence */
+		/* Try to parse the first element of the sequence. */
 		DECL_RESULT(seq_elem);
 		if (parse_part(parser, element, &seq_begin, &seq_elem))
 		{
-			/* Now parse the remainder elements of the sequence */
+			/* Now parse the remainder elements of the sequence (and thereafter the remainder of the rule. */
 			if (parse_seq(parser, element, &seq_elem, prev_result, end_function, rule_result))
 			{
 				DISP_RESULT(seq_elem);
@@ -1063,6 +1093,18 @@ bool parse_part(parser_p parser, element_p element, const result_p prev_result, 
 					return FALSE;
 			}
 			break;
+		case rk_term:
+			/* Call the terminal parse function and see if it has parsed something */
+			{
+				const char *next_pos = element->info.terminal_function(parser->text_buffer->info, result);
+				/* If the start position is returned, assume that it failed. */
+				if (next_pos <= parser->text_buffer->info)
+					return FALSE;
+				/* Increment the buffer till the returned position */
+				while (parser->text_buffer->info < next_pos)
+					text_buffer_next(parser->text_buffer);
+			}
+			break;
 		default:
 			return FALSE;
 			break;
@@ -1078,6 +1120,8 @@ bool parse_part(parser_p parser, element_p element, const result_p prev_result, 
 
 bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, end_function_p end_function, result_p rule_result)
 {
+	/* In case of the avoid modifier, first an attempt is made to parse the
+	   remained of the rule */
 	if (element->avoid)
 	{
 		DECL_RESULT(result);
@@ -1094,30 +1138,48 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 		DISP_RESULT(result);
 	}
 	
+	/* If a chain rule is defined, try to parse it.*/
 	if (element->chain_rule != NULL)
 	{
 		DECL_RESULT(dummy_chain_elem);
-		if (!parse_rule(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem))
+		if (parse_rule(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem))
 		{
+			/* If the chain rule was succesful, an element should follow. */
 			DISP_RESULT(dummy_chain_elem);
+			DECL_RESULT(seq_elem);
+			if (parse_part(parser, element, prev_seq, &seq_elem))
+			{
+				/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
+				if (parse_seq(parser, element, &seq_elem, prev, end_function, rule_result))
+				{
+					DISP_RESULT(seq_elem);
+					return TRUE;
+				}
+			}
+			DISP_RESULT(seq_elem);
 			return FALSE;
 		}
 		DISP_RESULT(dummy_chain_elem);
 	}
-
-	DECL_RESULT(seq_elem);
-	if (parse_part(parser, element, prev_seq, &seq_elem))
+	else
 	{
-		if (parse_seq(parser, element, &seq_elem, prev, end_function, rule_result))
+		/* Try to parse the next element of the sequence */
+		DECL_RESULT(seq_elem);
+		if (parse_part(parser, element, prev_seq, &seq_elem))
 		{
-			DISP_RESULT(seq_elem);
-			DEBUG_EXIT("parse_rule = ");
-			DEBUG_PT(rule_result); DEBUG_NL;
-			return TRUE;
+			/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
+			if (parse_seq(parser, element, &seq_elem, prev, end_function, rule_result))
+			{
+				DISP_RESULT(seq_elem);
+				return TRUE;
+			}
 		}
+		DISP_RESULT(seq_elem);
 	}
-	DISP_RESULT(seq_elem);
 	
+	/* In case of the avoid modifier, an attempt to parse the remained of the
+	   rule, was already made. So, only in case of no avoid modifier, attempt
+	   to parse the remainder of the rule */
 	if (!element->avoid)
 	{
 		DECL_RESULT(result);
@@ -1421,20 +1483,15 @@ char *string(char *s)
 
 
 
-typedef struct tree_t tree_t, *tree_p;
-typedef struct list_t list_t, *list_p;
+typedef struct tree_t *tree_p;
+typedef struct list_t;
 
 struct tree_t
-{   char *type;
-	union
-	{   list_p parts;
-		char   *str_value;
-		int	int_value;
-		double double_value;
-		char   char_value;
-	} c;
-	word line, column;
-	longword refcount;
+{
+	ref_counted_base_t _base;
+	char *type;
+	list_p parts;
+	result_t result;
 };
 
 struct list_t
