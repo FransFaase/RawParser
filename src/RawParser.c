@@ -145,12 +145,13 @@ non_terminal_p find_nt(char *name, non_terminal_p *p_nt)
 
 /*  Definition of an alternative  */
 
-typedef bool (*end_function_p)(const result_p rule_result, result_p result);
+typedef bool (*end_function_p)(const result_p rule_result, void* data, result_p result);
 
 struct alternative
 {
 	element_p rule;               /* The rule definition */
 	end_function_p end_function;  /* Function pointer */
+	void *end_data;               /* Some additional data based to end_function */
 	alternative_p next;           /* Next alternative */
 };
 
@@ -159,6 +160,7 @@ alternative_p new_alternative()
 	alternative_p alternative = MALLOC(struct alternative);
 	alternative->rule = NULL;
 	alternative->end_function = NULL;
+	alternative->end_data = NULL;
 	alternative->next = NULL;
 	return alternative;
 }
@@ -303,14 +305,14 @@ void element_print(FILE *f, element_p element)
 #define HEADER(N) non_terminal_p *_nt = all_nt; non_terminal_p nt; alternative_p* ref_alternative; alternative_p* ref_rec_alternative; alternative_p alternative; element_p* ref_element; element_p element;
 #define NT_DEF(N) nt = find_nt(N, _nt); ref_alternative = &nt->first; ref_rec_alternative = &nt->recursive;
 #define RULE alternative = *ref_alternative = new_alternative(); ref_alternative = &alternative->next; ref_element = &alternative->rule;
-#define REC_RULE alternative = *ref_rec_alternative = ; ref_rec_alternative = &alternative->next; ref_element = &alternative->rule;
+#define REC_RULE alternative = *ref_rec_alternative = new_alternative(); ref_rec_alternative = &alternative->next; ref_element = &alternative->rule;
 #define _NEW_GR(K) element = *ref_element = new_element(K); ref_element = &element->next;
-#define NT(N,F) _NEW_GR(rk_nt) element->info.non_terminal = find_nt(N, _nt); element->add_function = F;
+#define NTF(N,F) _NEW_GR(rk_nt) element->info.non_terminal = find_nt(N, _nt); element->add_function = F;
 #define END _NEW_GR(rk_end)
 #define SEQ(S,E) element->sequence = TRUE; element->begin_seq_function = S; element->add_seq_function = E;
 #define OPT(F) element->optional = TRUE; element->add_skip_function = F;
 #define AVOID element->avoid = TRUE;
-#define CHAR(C,F) _NEW_GR(rk_char) element->info.ch = C; element->add_char_function = F;
+#define CHAR(C) _NEW_GR(rk_char) element->info.ch = C;
 #define CHARSET(F) _NEW_GR(rk_charset) element->info.char_set = MALLOC(char_set_t); element->add_char_function = F;
 #define ADD_CHAR(C) char_set_add_char(element->info.char_set, C);
 #define ADD_RANGE(F,T) char_set_add_range(element->info.char_set, F, T);
@@ -341,16 +343,16 @@ void white_space_grammar(non_terminal_p *all_nt)
 				RULE /* for the usual white space characters */
 					CHARSET(0) ADD_CHAR(' ') ADD_CHAR('\t') ADD_CHAR('\n')
 				RULE /* for the single line comment starting with two slashes */
-					CHAR('/', 0)
-					CHAR('/', 0)
+					CHAR('/')
+					CHAR('/')
 					CHARSET(0) ADD_RANGE(' ', 255) ADD_CHAR('\t') SEQ(0, 0) OPT(0)
-					CHAR('\n', 0)
+					CHAR('\n')
 				RULE /* for the traditional C-comment (using avoid modifier) */
-					CHAR('/', 0)
-					CHAR('*', 0)
+					CHAR('/')
+					CHAR('*')
 					CHARSET(0) ADD_RANGE(' ', 255) ADD_CHAR('\t') ADD_CHAR('\n') SEQ(0, 0) OPT(0) AVOID
-					CHAR('*', 0)
-					CHAR('/', 0)
+					CHAR('*')
+					CHAR('/')
 			CLOSE SEQ(0, 0) OPT(0)
 }
 
@@ -426,6 +428,15 @@ void result_assign(result_p trg, result_p src)
 		old_trg.dec(old_trg.data);
 }
 
+void result_transfer(result_p trg, result_p src)
+{
+	result_t old_trg = *trg;
+	*trg = *src;
+	result_init(src);
+	if (old_trg.dec != 0)
+		old_trg.dec(old_trg.data);
+}
+
 void result_release(result_p result)
 {
 	if (result->dec != 0)
@@ -480,7 +491,6 @@ void result_assign_ref_counted(result_p result, void *data)
 {
 	if (debug_allocations) fprintf(stderr, "Allocated %p\n", data);
 	((ref_counted_base_p)data)->cnt = 1;
-	((ref_counted_base_p)data)->release = NULL;
 	result->data = data;
 	result->inc = ref_counted_base_inc;
 	result->dec = ref_counted_base_dec;
@@ -506,7 +516,9 @@ void number_print(void *data, FILE *fout) { fprintf(fout, "number %ld", ((number
 
 void new_number_data(result_p result)
 {
-	result_assign_ref_counted(result, MALLOC(struct number_data));
+	number_data_p number_data = MALLOC(struct number_data);
+	number_data->_base.release = NULL;
+	result_assign_ref_counted(result, number_data);
 	result->print = number_print;
 }
 
@@ -702,7 +714,7 @@ void parser_init(parser_p parser, text_buffer_p text_buffer)
 	
 */
 
-bool parse_rule(parser_p parser, element_p element, const result_p prev_result, end_function_p end_function, result_p rule_result);
+bool parse_rule(parser_p parser, element_p element, const result_p prev_result, alternative_p alternative, result_p rule_result);
 
 bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 {
@@ -747,7 +759,7 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 	for (alternative = non_term->first; alternative != NULL; alternative = alternative->next )
 	{
 		DECL_RESULT(start)
-		if (parse_rule(parser, alternative->rule, &start, alternative->end_function, result))
+		if (parse_rule(parser, alternative->rule, &start, alternative, result))
 			break;
 	}
 	
@@ -776,7 +788,7 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 		for (alternative = non_term->recursive; alternative != NULL; alternative = alternative->next)
 		{
 			DECL_RESULT(rule_result)
-			if (parse_rule(parser, alternative->rule, result, alternative->end_function, &rule_result))
+			if (parse_rule(parser, alternative->rule, result, alternative, &rule_result))
 			{   
 				result_assign(result, &rule_result);
 				DISP_RESULT(rule_result)
@@ -823,9 +835,9 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 */
 
 bool parse_part(parser_p parser, element_p element, const result_p prev_result, result_p result);
-bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, end_function_p end_function, result_p result);
+bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, alternative_p alternative, result_p result);
 
-bool parse_rule(parser_p parser, element_p element, const result_p prev_result, end_function_p end_function, result_p rule_result)
+bool parse_rule(parser_p parser, element_p element, const result_p prev_result, alternative_p alternative, result_p rule_result)
 {
 	DEBUG_ENTER("parse_rule: ");
 	DEBUG_PR(element); DEBUG_NL;
@@ -833,9 +845,9 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 	if (element == NULL)
 	{
 		/* At the end of the rule: */
-		if (end_function == 0)
+		if (alternative->end_function == 0)
 			result_assign(rule_result, prev_result);
-		else if (!end_function(prev_result, rule_result))
+		else if (!alternative->end_function(prev_result, alternative->end_data, rule_result))
 		{
 			DEBUG_EXIT("parse_rule failed by end function "); DEBUG_NL;
 			return FALSE;
@@ -883,7 +895,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 		else
 			result_assign(&skip_result, prev_result);
 			
-		if (parse_rule(parser, element->next, &skip_result, end_function, rule_result))
+		if (parse_rule(parser, element->next, &skip_result, alternative, rule_result))
 		{
 			DISP_RESULT(skip_result);
             DEBUG_EXIT("parse_rule = ");
@@ -906,7 +918,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 		if (parse_part(parser, element, &seq_begin, &seq_elem))
 		{
 			/* Now parse the remainder elements of the sequence (and thereafter the remainder of the rule. */
-			if (parse_seq(parser, element, &seq_elem, prev_result, end_function, rule_result))
+			if (parse_seq(parser, element, &seq_elem, prev_result, alternative, rule_result))
 			{
 				DISP_RESULT(seq_elem);
 				DISP_RESULT(seq_begin);
@@ -924,7 +936,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 		DECL_RESULT(elem);
 		if (parse_part(parser, element, prev_result, &elem))
 		{
-			if (parse_rule(parser, element->next, &elem, end_function, rule_result))
+			if (parse_rule(parser, element->next, &elem, alternative, rule_result))
 			{
 				DISP_RESULT(elem);
 				DEBUG_EXIT("parse_rule = ");
@@ -964,7 +976,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 		else
 			result_assign(&skip_result, prev_result);
 			
-		if (parse_rule(parser, element->next, &skip_result, end_function, rule_result))
+		if (parse_rule(parser, element->next, &skip_result, alternative, rule_result))
 		{
 			DISP_RESULT(skip_result);
             DEBUG_EXIT("parse_rule = ");
@@ -1034,7 +1046,7 @@ bool parse_part(parser_p parser, element_p element, const result_p prev_result, 
 				for ( ; alternative != NULL; alternative = alternative->next )
 				{
 					DECL_RESULT(start);
-					if (parse_rule(parser, alternative->rule, &start, alternative->end_function, result))
+					if (parse_rule(parser, alternative->rule, &start, alternative, result))
 					{
 						DISP_RESULT(start);
 						break;
@@ -1118,7 +1130,7 @@ bool parse_part(parser_p parser, element_p element, const result_p prev_result, 
 }
 
 
-bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, end_function_p end_function, result_p rule_result)
+bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, alternative_p alternative, result_p rule_result)
 {
 	/* In case of the avoid modifier, first an attempt is made to parse the
 	   remained of the rule */
@@ -1130,7 +1142,7 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 			DISP_RESULT(result);
 			return FALSE;
 		}
-		if (parse_rule(parser, element->next, &result, end_function, rule_result))
+		if (parse_rule(parser, element->next, &result, alternative, rule_result))
 		{
 			DISP_RESULT(result);
 			return TRUE;
@@ -1150,7 +1162,7 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 			if (parse_part(parser, element, prev_seq, &seq_elem))
 			{
 				/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
-				if (parse_seq(parser, element, &seq_elem, prev, end_function, rule_result))
+				if (parse_seq(parser, element, &seq_elem, prev, alternative, rule_result))
 				{
 					DISP_RESULT(seq_elem);
 					return TRUE;
@@ -1168,7 +1180,7 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 		if (parse_part(parser, element, prev_seq, &seq_elem))
 		{
 			/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
-			if (parse_seq(parser, element, &seq_elem, prev, end_function, rule_result))
+			if (parse_seq(parser, element, &seq_elem, prev, alternative, rule_result))
 			{
 				DISP_RESULT(seq_elem);
 				return TRUE;
@@ -1189,7 +1201,7 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 			return FALSE;
 		}
 		
-		if (parse_rule(parser, element->next, &result, end_function, rule_result))
+		if (parse_rule(parser, element->next, &result, alternative, rule_result))
 		{
 			DISP_RESULT(result);
 			return TRUE;
@@ -1298,7 +1310,8 @@ void test_parse_white_space(non_terminal_p *all_nt, const char *input)
 	{
 		fprintf(stderr, "ERROR: failed to parse white space from '%s'\n", input);
 	}
-	
+	DISP_RESULT(result);
+		
 	solutions_free(&solutions);
 }
 
@@ -1350,36 +1363,163 @@ void test_number_grammar(non_terminal_p *all_nt)
 	test_parse_number(all_nt, "123", 123);
 }
 
-int main(int argc, char *argv[])
+/*
+	Abstract Syntax Tree
+	~~~~~~~~~~~~~~~~~~~~
+	The following section of the code implements a representation for
+	Abstract Syntax Trees.
+*/
+
+typedef struct
 {
-	non_terminal_p all_nt = NULL;
+	ref_counted_base_t _base;
+	const char *type_name;
+	word line;
+	word column;
+} tree_node_t, *tree_node_p;
 
-	// debug_parse = TRUE;
-	
-	white_space_grammar(&all_nt);
-	test_white_space_grammar(&all_nt);
-
-	number_grammar(&all_nt);
-	test_number_grammar(&all_nt);
-
-	return 0;
+void init_tree_node(tree_node_p tree_node, const char *type_name, void (*release_node)(void *))
+{
+	tree_node->_base.cnt = 1;
+	tree_node->_base.release = release_node;
+	tree_node->type_name = type_name;
+	tree_node->line = 0;
+	tree_node->column = 0;
 }
 
-#if 0
+typedef struct tree_t *tree_p;
+struct tree_t
+{
+	tree_node_t _node;
+	word nr_children;
+	result_t *children;
+};
+
+tree_p old_trees = NULL;
+long alloced_trees = 0L;
+
+void release_tree(void *data)
+{
+	tree_p tree = (tree_p)data;;
+
+	alloced_trees--;
+
+	if (tree->nr_children > 0)
+	{
+		for (int i = 0; i < tree->nr_children; i++)
+			result_release(&tree->children[i]);
+		free(tree->children);
+	}
+	*(tree_p*)tree = old_trees;
+	old_trees = tree;
+}
+
+tree_p malloc_tree(const char *name)
+{
+	tree_p new_tree;
+
+	if (old_trees)
+	{   new_tree = old_trees;
+		old_trees = *(tree_p*)old_trees;
+	}
+	else
+		new_tree = MALLOC(struct tree_t);
+
+	init_tree_node(&new_tree->_node, name, release_tree);
+	new_tree->nr_children = 0;
+	new_tree->children = NULL;
+	
+	alloced_trees++;
+
+	return new_tree;
+}
+
+typedef struct prev_child_t *prev_child_p;
+struct prev_child_t
+{
+	ref_counted_base_t _base;
+	prev_child_p prev;
+	tree_p child;
+};
+
+prev_child_p old_prev_child = NULL;
+
+void release_prev_child( void *data )
+{
+	prev_child_p prev_child = (prev_child_p)data;
+	*(prev_child_p*)prev_child = old_prev_child;
+	old_prev_child = prev_child;
+}
+
+prev_child_p malloc_prev_child()
+{   prev_child_p new_prev_child;
+
+	if (old_prev_child)
+	{   new_prev_child = old_prev_child;
+		old_prev_child = *(prev_child_p*)old_prev_child;
+	}
+	else
+		new_prev_child = MALLOC(struct prev_child_t);
+
+	new_prev_child->_base.cnt = 1;
+	new_prev_child->_base.release = release_prev_child;
+
+	return new_prev_child;
+}
+
+bool add_child(result_p prev, result_p elem, result_p result)
+{
+	prev_child_p new_prev_child = malloc_prev_child();
+	new_prev_child->prev = (prev_child_p)prev->data;
+	new_prev_child->child = (tree_p)elem->data;
+	result_assign_ref_counted(result, new_prev_child);
+}
+
+bool make_tree(const result_p rule_result, void* data, result_p result)
+{
+	prev_child_p children = (prev_child_p)rule_result;
+	const char *name = (const char*)data;
+	tree_p tree = malloc_tree(name);
+	prev_child_p child;
+	int i = 0;
+	for (child = children; child != NULL; child = child->prev)
+		i++;
+	tree->nr_children = i;
+	tree->children = MALLOC_N(tree->nr_children, result_t);
+	for (child = children; child != NULL; child = child->prev)
+	{
+		i--;
+		result_init(&tree->children[i]);
+		result_assign(&tree->children[i], (result_p)child->child);
+	}
+	result_assign_ref_counted(result, tree);
+}
+
+bool pass_tree(const result_p rule_result, void* data, result_p result)
+{
+	result_transfer(result, rule_result);
+}
 
 
 /*
+	Keywords
+	~~~~~~~~
+	Many programming languages have keywords, which have the same lexical
+	catagory as identifiers. This means we need some function to test
+	whether an identifier is equal to one of the keywords. One way to
+	do this is to use hexadecimal hash tree. This can also be used to map
+	every identifier to a unique pointer, such that comparing two identifiers
+	can simply be done by comparing the two pointers.
+
 	A hexadecimal hash tree
 	~~~~~~~~~~~~~~~~~~~~~~~	
-	The following structure implements a mapping
-	of strings to an integer value in the range [0..254].
-	It is a tree of hashs in combination with a very
-	fast incremental hash function. In this way, it
-	tries to combine the benefits of trees and hashs.
-	The incremental hash function will first return 
-	the lower 4 bits of the characters in the string, 
-	and following this the higher 4 bits of the characters.
-*/	
+	The following structure implements a mapping of strings to an integer
+	value in the range [0..254]. It is a tree of hashs in combination with
+	a very fast incremental hash function. In this way, it tries to combine
+	the benefits of trees and hashs. The incremental hash function will first
+	return the lower 4 bits of the characters in the string, and following
+	this the higher 4 bits of the characters.
+*/
 
 typedef struct hexa_hash_tree_t hexa_hash_tree_t, *hexa_hash_tree_p;
 
@@ -1394,11 +1534,10 @@ struct hexa_hash_tree_t
 byte *keyword_state = NULL;
 
 char *string(char *s)
-/* Returns a unique address representing the
-   string. the global keyword_state will point
-   to the integer value in the range [0..254].
-   If the string does not occure in the store,
-   it is added and the state is initialized with 0.
+/*  Returns a unique address representing the string. the global
+    keyword_state will point to the integer value in the range [0..254].
+	If the string does not occure in the store, it is added and the state
+	is initialized with 0.
 */
 {
 	static hexa_hash_tree_p hash_tree = NULL;
@@ -1464,537 +1603,499 @@ char *string(char *s)
 	}
 }
 
+/*  Parsing an identifier  */
 
-
-
-
-
-
-
-
-
-
-/*
-	Abstract Parse Trees
-	~~~~~~~~~~~~~~~~~~~~
-	The following section of the code implements
-	a representation for Abstract Parse Trees.
-*/
-
-
-
-typedef struct tree_t *tree_p;
-typedef struct list_t;
-
-struct tree_t
+typedef struct ident_data
 {
 	ref_counted_base_t _base;
-	char *type;
-	list_p parts;
-	result_t result;
+	char ident[65];
+	int len;
+} *ident_data_p;
+
+typedef struct ident_t *ident_p;
+struct ident_t
+{
+	tree_node_t _node;
+	const char *name;
 };
 
-struct list_t
-{   list_p next;
-	tree_p first;
-};
-
-char *tt_str_value,
-	 *tt_int_value,
-	 *tt_list;
-
-/* Special strings, one for each terminal */
-char *tt_ident = "identifier";
-char *tt_str_value = "string value";
-char *tt_int_value = "integer value";
-char *tt_double_value = "double value";
-char *tt_char_value = "char value";
-char *tt_list = "list";
-
-
-tree_p old_trees = NULL;
-list_p old_lists = NULL;
-long alloced_trees = 0;
-
-tree_p malloc_tree( void )
-{   tree_p new;
-
-	if (old_trees)
-	{   new = old_trees;
-		old_trees = (tree_p)old_trees->type;
+bool ident_add_char(result_p prev, char ch, result_p result)
+{
+	if (prev->data == NULL)
+	{
+		ident_data_p ident_data = MALLOC(struct ident_data);
+		ident_data->_base.release = NULL;
+		result_assign_ref_counted(result, ident_data);
+		ident_data->ident[0] = ch;
+		ident_data->len = 1;
 	}
 	else
-		new = MALLOC(tree_t);
-
-	new->line = 0;
-	new->column = 0;
-	new->refcount = 1;
-	alloced_trees++;
-
-	return new;
-} 
-
-void free_list( list_p list );
-
-bool type_can_have_parts( char *type )
-{
-	return	type != tt_ident 
-		   && type != tt_str_value
-		   && type != tt_int_value
-		   && type != tt_double_value
-		   && type != tt_char_value;
-}
-
-
-void tree_release( tree_p *r_t )
-{   tree_p t = *r_t;
-
-	if (t == NULL)
-		return;
-
-	alloced_trees--;
-	t->refcount--;
-
-	if (t->refcount == 0)
 	{
-		if (type_can_have_parts(t->type))
-		{   list_p list = t->c.parts;
-
-			while (list != NULL)
-			{   list_p next = list->next;
-				free_list(list);
-				list = next;
-			}
-		}
-
-		t->type = (char*)old_trees;
-		old_trees = t;
+		result_assign(result, prev);
+		ident_data_p ident_data = (ident_data_p)result->data;
+		if (ident_data->len < 64)
+			ident_data->ident[ident_data->len++] = ch;
 	}
-	*r_t = NULL;
 }
 
-void free_list( list_p list )
-{ tree_release(&list->first);
-  list->next = old_lists;
-  old_lists = list;
+void pass_to_sequence(result_p prev, result_p seq)
+{
+	result_assign(seq, prev);
 }
 
-void tree_assign(tree_p *d, tree_p s)
+const char *ident_type = "ident";
+
+bool create_ident_tree(const result_p rule_result, void* data, result_p result)
 {
-  tree_p old_d = *d;
-
-  *d = s;
-  if (s != NULL)
-  {
-	s->refcount++;
-	alloced_trees++;
-  }
-  if (old_d != NULL)
-	  tree_release(&old_d);
-}
-
-void tree_move(tree_p *d, tree_p *s)
-{
-  tree_p old_d = *d;
-
-  *d = *s;
-  *s = NULL;
-  if (old_d != NULL)
-	  tree_release(&old_d);
-}
-
-static list_p malloc_list( void )
-{   list_p new;
-	if (old_lists)
-	{   new = old_lists;
-		old_lists = old_lists->next;
-	}
-	else
-		new = MALLOC(list_t);
-	new->next = NULL;
-	new->first = NULL;
-	return new;
-} 
-
-tree_p make_ident( char *str )
-{
-	tree_p tree = malloc_tree();
-	tree->type = tt_ident;
-	tree->c.str_value = str; 
-	return tree;
-}
-
-tree_p make_str_atom( char *str )
-{
-	tree_p tree = malloc_tree();
-	tree->type = tt_str_value;
-	tree->c.str_value = str; 
-	return tree;
-}
-
-tree_p make_double_atom( double value )
-{
-	tree_p tree = malloc_tree();
-	tree->type = tt_double_value;
-	tree->c.double_value = value; 
-	return tree;
-}
-
-tree_p make_char_atom( char value )
-{
-	tree_p tree = malloc_tree();
-	tree->type = tt_char_value;
-	tree->c.char_value = value; 
-	return tree;
-}
-
-tree_p make_int_atom( int value )
-{
-	tree_p tree = malloc_tree();
-	tree->type = tt_int_value;
-	tree->c.int_value = value; 
-	return tree;
-}
-
-tree_p make_list( void )
-{
-	tree_p tree = malloc_tree();
-	tree->type = tt_list;
-	tree->c.parts = NULL;
-	return tree;
-}
-	
-tree_p make_tree( char *name )
-{
-	tree_p tree = malloc_tree();
-	tree->type = name;
-	tree->c.parts = NULL;
-	return tree;
-}
-   
-void insert_element( tree_p tree, tree_p element )
-{
-	list_p r_list;
-
-	r_list = malloc_list();
-	tree_assign(&r_list->first, element);
-	r_list->next = tree->c.parts;
-	tree->c.parts = r_list;
-} 
-
-void add_element( tree_p tree, tree_p element )
-{
-	list_p *r_list = &tree->c.parts;
-
-	while (*r_list != NULL)
-		r_list = &(*r_list)->next;
-
-	*r_list = malloc_list();
-	tree_assign(&(*r_list)->first, element);
-}
-
-void drop_last_element( tree_p tree )
-{
-	list_p *r_list = &tree->c.parts;
-
-	if (*r_list == NULL)
-		return;
-
-	while ((*r_list)->next != NULL)
-		r_list = &(*r_list)->next;
-
-	free_list(*r_list);
-	*r_list = NULL;
-} 
-
-inline list_p elements( tree_p tree )
-{
-	return tree->c.parts;
-}
-
-inline bool is_a_ident( tree_p tree )
-{
-	return tree && tree->type == tt_ident;
-}
-
-inline bool is_ident( tree_p tree, char *ident )
-{
-	return	tree
-		   && tree->type == tt_ident
-		   && tree->c.str_value == ident;
-}
-
-inline bool equal_ident( tree_p tree, char *ident )
-{
-	return tree->c.str_value == ident;
-}
-
-inline bool is_a_str( tree_p tree )
-{
-	return tree && tree->type == tt_str_value;
-}
-
-inline bool is_str( tree_p tree, char *str )
-{
-	return	tree
-		   && tree->type == tt_str_value
-		   && tree->c.str_value == str;
-}
-
-inline bool is_a_int( tree_p tree )
-{
-	return tree && tree->type == tt_int_value;
-}
-
-inline bool is_a_double( tree_p tree )
-{
-	return tree && tree->type == tt_double_value;
-}
-
-inline bool is_a_char( tree_p tree )
-{
-	return tree && tree->type == tt_char_value;
-}
-
-inline bool is_a_list( tree_p tree )
-{
-	return tree && tree->type == tt_list;
-}
-
-inline bool is_tree( tree_p tree, char *name )
-{
-	return tree && tree->type == name;
-}
-
-inline bool equal_tree( tree_p tree, char *name )
-{
-	return tree->type == name;
-}
-
-int nr_parts( tree_p tree )
-{
-	list_p parts = tree != NULL ? tree->c.parts : NULL;
-	int nr = 0;
-	
-	for (; parts; parts = parts->next)
-		nr++;
-		
-	return nr;
-}	
-	
-tree_p part( tree_p tree, int i )
-{
-	list_p parts = tree->c.parts;
-
-	for (i--; parts && i > 0; parts = parts->next, i--);
-
-	return parts ? parts->first : NULL;
-}
-
-/*
-	Functions for printing the parse tree in a human
-	readable form with smart indentation.
-*/
-
-int print_tree_depth = 0;
-void print_list(FILE *f, list_p list, bool compact);
-
-void print_tree( FILE *f, tree_p tree, bool compact )
-{
-	if (tree == NULL)
-		fprintf(f, "[NULL]");
-	else 
+	ident_data_p ident_data = (ident_data_p)rule_result->data;
+	if (ident_data == 0)
 	{
-		if (tree->line != 0)
-			fprintf(f, "#%d:%d#", tree->line, tree->column);
- 		if (is_a_ident(tree))
-			fprintf(f, "%s", tree->c.str_value);
-		else if (is_a_str(tree))
-			fprintf(f, "\"%s\"", tree->c.str_value);
-		else if (is_a_int(tree))
-			fprintf(f, "%d", tree->c.int_value);
-		else if (is_a_double(tree))
-			fprintf(f, "%f", tree->c.double_value);
-		else if (is_a_char(tree))
-			fprintf(f, "'%c'", tree->c.char_value);
-		else
-		{	
-			fprintf(f, "%s(", tree->type);
-	   
-			print_tree_depth += strlen(tree->type) + 1;
-			print_list(f, tree->c.parts, compact);
-			print_tree_depth -= strlen(tree->type) + 1;
-			fprintf(f, ")");
-		}
-	}
-	if (print_tree_depth == 0 && !compact)
-		fprintf(f, "\n");
-};
-
-void print_list(FILE *f, list_p list, bool compact)
-{   list_p l;
-	bool first = TRUE;
-
-	for (l = list; l; l = l->next)
-	{   if (!first)
-		{   if (compact)
-				fprintf(f, ",");
-			else 
-				fprintf(f, ",\n%*s", print_tree_depth, "");
-		}
-		first = FALSE;
-		/* fprintf(f, "[%lx]", (longword)l); */
-		print_tree(f, l->first, compact);
-	}
-}
-
-/*
-	Function for printing the Abstract Program Tree
-	in the form of a function, which after being
-	called, returns the reconstruction of the tree.
-	
-	This function can be used to hard-code a parser
-	for a given grammer. This function was used to
-	produce the function init_IParse_grammar below, 
-	which creates the Abstract Program Tree representing
-	the input grammar of IParse.
-*/
-
-static void print_tree_rec( FILE *f, tree_p tree );
- 
-void print_tree_to_c( FILE *f, tree_p tree, char *name )
-{   
-	fprintf(f, "void init_%s( tree_p *root )\n", name);
-	fprintf(f, "{   /* Generated by IParse version %s */\n", VERSION);
-	fprintf(f, "	tree_p tt[100];\n");
-	fprintf(f, "	int v = 0;\n");
-	fprintf(f, "\n");
-	fprintf(f, "#define ID(s) tt[v]=make_ident(string(s));\n");
-	fprintf(f, "#define LITERAL(s) tt[v]=make_str_atom(string(s));"
-								   " *keyword_state |= 1;\n");
-	fprintf(f, "#define INT(i) tt[v]=make_int_atom(i);\n");
-	fprintf(f, "#define DOUBLE(i) tt[v]=make_double_atom(i);\n");
-	fprintf(f, "#define CHAR(i) tt[v]=make_char_atom(i);\n");
-	fprintf(f, "#define TREE(n) tt[v]=make_tree(string(n)); v++;\n");
-	fprintf(f, "#define LIST tt[v]=make_list(); v++;\n");
-	fprintf(f, "#define NONE tt[v]=NULL;\n");
-	fprintf(f, "#define SEP add_element(tt[v-1],tt[v]); tree_release(&tt[v]);\n");
-	fprintf(f, "#define CLOSE add_element(tt[v-1],tt[v]); tree_release(&tt[v]); v--;\n");
-	fprintf(f, "#define EMPTY_CLOSE v--;\n");
-	fprintf(f, "\n	");
-
-	print_tree_rec( f, tree );
-	fprintf(f, "\n	*root = tt[0];\n}\n\n");
-}
-
-static void print_tree_rec( FILE *f, tree_p tree )
-{
-	if (tree == NULL)
-		 fprintf(f, "NONE ");
-	else if (is_a_ident(tree))
-	{	fprintf(f, "ID(\"%s\") ", tree->c.str_value);
-	}
-	else if (is_a_str(tree))
-	{	fprintf(f, "LITERAL(\"%s\") ", tree->c.str_value);
-	}
-	else if (is_a_int(tree))
-	{	fprintf(f, "INT(%d) ", tree->c.int_value);
-	}
-	else if (is_a_double(tree))
-	{	fprintf(f, "DOUBLE(%f) ", tree->c.double_value);
-	}
-	else if (is_a_char(tree))
-	{	fprintf(f, "CHAR('%c') ", tree->c.char_value);
-	}
-	else
-	{   list_p l;
-
-		if (is_a_list(tree))
-			fprintf(f, "LIST ");
-		else
-			fprintf(f, "TREE(\"%s\") ", tree->type);
-		if (tree->c.parts)
-		{   print_tree_depth++;
-
-			for (l = tree->c.parts; l; l = l->next)
-			{   print_tree_rec(f, l->first);
-				if (l->next)
-				  fprintf(f, "SEP\n%*.*s	",
-						  print_tree_depth, print_tree_depth, "");
-			}
-			print_tree_depth--;
-			fprintf(f, "CLOSE ");
-		}
-		else
-			fprintf(f, "EMPTY_CLOSE ");
-	}
-};
-
-int nr_exp_syms = 0;
-
-
-longword last_space_pos = (longword)-1;
-scan_pos_t last_space_end_pos;
-longword last_string_pos = (longword)-1;
-char *last_string;
-scan_pos_t last_string_end_pos;
-longword last_ident_pos = (longword)-1;
-char *last_ident;
-bool last_ident_is_keyword;
-scan_pos_t last_ident_end_pos;
-
-
-void init_scan(FILE *the_file)
-{
-	_assign(the_file);
-
-	f_file_pos = 0;
-	f_line = 1;
-	f_column = 1;
-	nr_exp_syms = 0;
-
-	last_space_pos = (longword)-1;
-	last_string_pos = (longword)-1;
-	last_ident_pos = (longword)-1;
-
-}
-
-bool accept_eof()
-{
-	if (_eof)
-	{
-		DEBUG_P3("%d.%d: accept_eof() for: `%s'\n",
-			 cur_line, start_column, start_info());
+		fprintf(stderr, "NULL\n");
 		return TRUE;
 	}
+	ident_data->ident[ident_data->len] = '\0';
+	ident_p ident = MALLOC(struct ident_t);
+	init_tree_node(&ident->_node, ident_type, NULL);
+	ident->name = string(ident_data->ident);
+	result_assign_ref_counted(result, ident);
+}
+
+
+void ident_grammar(non_terminal_p *all_nt)
+{
+	HEADER(all_nt)
+	
+	NT_DEF("ident")
+		RULE
+			CHARSET(ident_add_char) ADD_RANGE('a', 'z') ADD_RANGE('A', 'Z') ADD_CHAR('_') 
+			CHARSET(ident_add_char) ADD_RANGE('a', 'z') ADD_RANGE('A', 'Z') ADD_CHAR('_') ADD_RANGE('0', '9') SEQ(pass_to_sequence, use_sequence_result)
+			END_FUNCTION(create_ident_tree)
+}
+
+/*
+	Ident tests
+	~~~~~~~~~~~
+*/
+
+void test_parse_ident(non_terminal_p *all_nt, const char *input)
+{
+	text_buffer_t text_buffer;
+	text_buffer_assign_string(&text_buffer, input);
+	
+	solutions_t solutions;
+	solutions_init(&solutions, &text_buffer);
+	
+	parser_t parser;
+	parser_init(&parser, &text_buffer);
+	parser.cache_hit_function = solutions_find;
+	parser.cache = &solutions;
+	
+	DECL_RESULT(result);
+	if (parse_nt(&parser, find_nt("ident", all_nt), &result) && text_buffer_end(&text_buffer))
+	{
+		if (result.data == NULL)
+			fprintf(stderr, "ERROR: parsing '%s' did not return result\n", input);
+		else
+		{
+			tree_node_p tree_node = (tree_node_p)result.data;
+			if (tree_node->type_name != ident_type)
+				fprintf(stderr, "ERROR: tree node is not of type ident_type\n");
+			else
+			{
+				ident_p ident = (ident_p)tree_node;
+				if (strcmp(ident->name, input) != 0)
+					fprintf(stderr, "ERROR: parsed value '%s' from '%s' instead of expected '%s'\n",
+					ident->name, input, input);
+				else
+					fprintf(stderr, "OK: parsed ident '%s' from '%s'\n", ident->name, input);
+			}
+		}
+	}
 	else
 	{
-		DEBUG_F_P3("%d.%d: accept_eof() failed for: `%s'\n",
-			 cur_line, cur_column, start_info());
-		expected_string("<eof>", NULL);
-		return FALSE;
+		fprintf(stderr, "ERROR: failed to parse ident from '%s'\n", input);
 	}
+	DISP_RESULT(result);
+	
+	solutions_free(&solutions);
+}
+
+void test_ident_grammar(non_terminal_p *all_nt)
+{
+	test_parse_ident(all_nt, "aBc");
+	test_parse_ident(all_nt, "_123");
+}
+
+int main(int argc, char *argv[])
+{
+	non_terminal_p all_nt = NULL;
+
+	// debug_parse = TRUE;
+	
+	white_space_grammar(&all_nt);
+	test_white_space_grammar(&all_nt);
+
+	number_grammar(&all_nt);
+	test_number_grammar(&all_nt);
+
+	ident_grammar(&all_nt);
+	test_ident_grammar(&all_nt);
+
+	return 0;
+}
+
+
+#if 0
+
+bool equal_string(result_p result, const void *argument)
+{
+	const char *keyword_name = (const char*)argument;
+	/* TODO: Implement */
+	return FALSE;
+}
+
+bool not_a_keyword(result_p result, const void *argument)
+{
+	//string();
+	return *keyword_state == 0;
+}
+
+bool add_seq_as_list(result_p prev, result_p seq, result_p result)
+{
+	/* TODO: Implement */
+	return FALSE;
+}
+
+#define NT(S) NTF(S, 0)
+#define PASS alternative->end_function = pass_tree;
+#define TREE(N) alternative->end_function = make_tree; alternative->end_data = N;
+#define KEYWORD(K) NTF("ident", 0) element->condition = equal_string; element->condition_argument = string(K); *keyword_state = 1;
+#define CHAIN(X)
+#define OPTN OPT(0)
+#define IDENT NTF("ident", 0) element->condition = not_a_keyword;
+#define WS NT("white_space")
+#define SEQL SEQ(0, add_seq_as_list)
+
+void c_grammar(non_terminal_p *all_nt)
+{
+	HEADER(all_nt)
+	
+	NT_DEF("primary_expr")
+	RULE IDENT
+	RULE NT("int")
+	RULE NT("double")
+	RULE NT("char")
+	RULE NT("string")
+	RULE CHAR('(') NT("expr") CHAR(')')
+
+	NT_DEF("postfix_expr")
+	RULE NT("primary_expr")
+	REC_RULE CHAR('[') NT("expr") CHAR(']') TREE("arrayexp")
+	REC_RULE CHAR('(') NT("assignment_expr") CHAIN(",") OPTN CHAR(')') TREE("call")
+	REC_RULE CHAR('.') IDENT TREE("field")
+	REC_RULE CHAR('-') CHAR('>') IDENT TREE("fieldderef")
+	REC_RULE CHAR('+') CHAR('+') TREE("post_inc")
+	REC_RULE CHAR('-') CHAR('-') TREE("post_dec")
+
+	NT_DEF("unary_expr")
+	RULE CHAR('+') CHAR('+') NT("unary_expr") TREE("pre_inc")
+	RULE CHAR('-') CHAR('-') NT("unary_expr") TREE("pre_dec")
+	RULE CHAR('&') NT("cast_expr") TREE("address_of")
+	RULE CHAR('*') NT("cast_expr") TREE("deref")
+	RULE CHAR('+') NT("cast_expr") TREE("plus")
+	RULE CHAR('-') NT("cast_expr") TREE("min")
+	RULE CHAR('~') NT("cast_expr") TREE("invert")
+	RULE CHAR('!') NT("cast_expr") TREE("not")
+	RULE KEYWORD("sizeof")
+	OPEN
+		RULE NT("unary_expr") TREE("typeof")
+		RULE CHAR('(') IDENT CHAR(')')
+	CLOSE TREE("sizeof")
+	RULE NT("postfix_expr")
+
+	NT_DEF("cast_expr")
+	RULE CHAR('(') NT("abstract_declaration") CHAR(')') NT("cast_expr") TREE("cast")
+	RULE NT("unary_expr")
+
+	NT_DEF("l_expr1")
+	RULE NT("cast_expr")
+	REC_RULE WS CHAR('*') WS NT("cast_expr") TREE("times")
+	REC_RULE WS CHAR('/') WS NT("cast_expr") TREE("div")
+	REC_RULE WS CHAR('%') WS NT("cast_expr") TREE("mod")
+
+	NT_DEF("l_expr2")
+	RULE NT("l_expr1")
+	REC_RULE WS CHAR('+') WS NT("l_expr1") TREE("add")
+	REC_RULE WS CHAR('-') WS NT("l_expr1") TREE("sub")
+
+	NT_DEF("l_expr3")
+	RULE NT("l_expr2")
+	REC_RULE WS CHAR('<') CHAR('<') WS NT("l_expr2") TREE("ls")
+	REC_RULE WS CHAR('>') CHAR('>') WS NT("l_expr2") TREE("rs")
+
+	NT_DEF("l_expr4")
+	RULE NT("l_expr3")
+	REC_RULE WS CHAR('<') CHAR('=') WS NT("l_expr3") TREE("le")
+	REC_RULE WS CHAR('>') CHAR('=') WS NT("l_expr3") TREE("ge")
+	REC_RULE WS CHAR('<') WS NT("l_expr3") TREE("lt")
+	REC_RULE WS CHAR('>') WS NT("l_expr3") TREE("gt")
+	REC_RULE WS CHAR('=') CHAR('=') WS NT("l_expr3") TREE("eq")
+	REC_RULE WS CHAR('!') CHAR('=') WS NT("l_expr3") TREE("ne")
+
+	NT_DEF("l_expr5")
+	RULE NT("l_expr4")
+	REC_RULE WS CHAR('^') WS NT("l_expr4") TREE("bexor")
+
+	NT_DEF("l_expr6")
+	RULE NT("l_expr5")
+	REC_RULE WS CHAR('&') WS NT("l_expr5") TREE("land")
+
+	NT_DEF("l_expr7")
+	RULE NT("l_expr6")
+	REC_RULE WS CHAR('|') WS NT("l_expr6") TREE("lor")
+
+	NT_DEF("l_expr8")
+	RULE NT("l_expr7")
+	REC_RULE WS CHAR('&') CHAR('&') WS NT("l_expr7") TREE("and")
+
+	NT_DEF("l_expr9")
+	RULE NT("l_expr8")
+	REC_RULE WS CHAR('|') CHAR('|') WS NT("l_expr8") TREE("or")
+
+	NT_DEF("conditional_expr")
+	RULE NT("l_expr9") WS CHAR('?') WS NT("l_expr9") WS CHAR(':') WS NT("conditional_expr") TREE("if_expr")
+	RULE NT("l_expr9")
+
+	NT_DEF("assignment_expr")
+	RULE NT("unary_expr") WS NT("assignment_operator") WS NT("assignment_expr") TREE("assignment")
+	RULE NT("conditional_expr")
+
+	NT_DEF("assignment_operator")
+	RULE CHAR('=') TREE("ass")
+	RULE CHAR('*') CHAR('=') TREE("times_ass")
+	RULE CHAR('/') CHAR('=') TREE("div_ass")
+	RULE CHAR('%') CHAR('=') TREE("mod_ass")
+	RULE CHAR('+') CHAR('=') TREE("add_ass")
+	RULE CHAR('-') CHAR('=') TREE("sub_ass")
+	RULE CHAR('<') CHAR('<') CHAR('=') TREE("sl_ass")
+	RULE CHAR('>') CHAR('>') CHAR('=') TREE("sr_ass")
+	RULE CHAR('&') CHAR('=') TREE("and_ass")
+	RULE CHAR('|') CHAR('=') TREE("or_ass")
+	RULE CHAR('^') CHAR('=') TREE("exor_ass")
+
+	NT_DEF("expr")
+	RULE NT("assignment_expr") CHAIN(",")
+
+	NT_DEF("constant_expr")
+	RULE NT("conditional_expr")
+
+	NT_DEF("declaration")
+	RULE
+	OPEN
+		RULE NT("storage_class_specifier")
+		RULE NT("type_specifier")
+	CLOSE SEQL OPTN AVOID
+	OPEN
+		RULE
+		OPEN
+			RULE NT("declarator")
+			OPEN
+				RULE WS CHAR('=') WS NT("initializer")
+			CLOSE OPTN
+		CLOSE CHAIN(",") OPTN CHAR(';') TREE("decl")
+		RULE NT("func_declarator") CHAR('(') NT("parameter_declaration_list") OPTN CHAR(')')
+		OPEN
+			RULE CHAR(';')
+			RULE CHAR('{') NT("decl_or_stat") CHAR('}')
+		CLOSE TREE("new_style")
+		RULE NT("func_declarator") CHAR('(') NT("ident_list") OPTN CHAR(')') NT("declaration") SEQL OPTN CHAR('{') NT("decl_or_stat") CHAR('}') TREE("old_style")
+	CLOSE
+
+	NT_DEF("storage_class_specifier")
+	RULE KEYWORD("typedef") TREE("typedef")
+	RULE KEYWORD("extern") TREE("extern")
+	RULE KEYWORD("static") TREE("static")
+	RULE KEYWORD("auto") TREE("auto")
+	RULE KEYWORD("register") TREE("register")
+
+	NT_DEF("type_specifier")
+	RULE KEYWORD("char") TREE("char")
+	RULE KEYWORD("short") TREE("short")
+	RULE KEYWORD("int") TREE("int")
+	RULE KEYWORD("long") TREE("long")
+	RULE KEYWORD("signed") TREE("signed")
+	RULE KEYWORD("unsigned") TREE("unsigned")
+	RULE KEYWORD("float") TREE("float")
+	RULE KEYWORD("double") TREE("double")
+	RULE KEYWORD("const") TREE("const")
+	RULE KEYWORD("volatile") TREE("volatile")
+	RULE KEYWORD("void") TREE("void")
+	RULE NT("struct_or_union_specifier")
+	RULE NT("enum_specifier")
+	RULE IDENT
+
+	NT_DEF("struct_or_union_specifier")
+	RULE KEYWORD("struct") IDENT CHAR('{')
+	OPEN
+		RULE NT("struct_declaration")
+	CLOSE SEQL CHAR('}') TREE("struct_d")
+	RULE KEYWORD("struct") CHAR('{')
+	OPEN
+		RULE NT("struct_declaration")
+	CLOSE SEQL CHAR('}') TREE("struct_n")
+	RULE KEYWORD("struct") IDENT TREE("struct")
+	RULE KEYWORD("union") IDENT CHAR('{')
+	OPEN
+		RULE NT("struct_declaration")
+	CLOSE SEQL CHAR('}') TREE("union_d")
+	RULE KEYWORD("union") CHAR('{')
+	OPEN
+		RULE NT("struct_declaration")
+	CLOSE SEQL CHAR('}') TREE("union_n")
+	RULE KEYWORD("union") IDENT TREE("union")
+
+	NT_DEF("struct_declaration")
+	RULE NT("type_specifier") NT("struct_declaration") TREE("type")
+	RULE NT("struct_declarator") CHAIN(",") CHAR(';') TREE("strdec")
+
+	NT_DEF("struct_declarator")
+	RULE NT("declarator")
+	OPEN
+		RULE CHAR(':') NT("constant_expr")
+	CLOSE OPTN TREE("record_field")
+
+	NT_DEF("enum_specifier")
+	RULE KEYWORD("enum") IDENT
+	OPEN
+		RULE CHAR('{') NT("enumerator") CHAIN(",") CHAR('}')
+	CLOSE TREE("enum")
+
+	NT_DEF("enumerator")
+	RULE IDENT
+	OPEN
+		RULE CHAR('=') NT("constant_expr")
+	CLOSE OPTN TREE("enumerator")
+
+	NT_DEF("func_declarator")
+	RULE CHAR('*')
+	OPEN
+		RULE KEYWORD("const") TREE("const")
+	CLOSE OPTN NT("func_declarator") TREE("pointdecl")
+	RULE KEYWORD("(") NT("func_declarator") CHAR(')')
+	RULE IDENT
+
+	NT_DEF("declarator")
+	RULE CHAR('*')
+	OPEN
+		RULE KEYWORD("const") TREE("const")
+	CLOSE OPTN NT("declarator") TREE("pointdecl")
+	RULE CHAR('(') NT("declarator") CHAR(')') TREE("brackets")
+	RULE WS IDENT
+	REC_RULE CHAR('[') NT("constant_expr") OPTN CHAR(']') TREE("array")
+	REC_RULE CHAR('(') NT("abstract_declaration_list") OPTN CHAR(')') TREE("function")
+
+	NT_DEF("abstract_declaration_list")
+	RULE NT("abstract_declaration")
+	OPEN
+		RULE CHAR(',')
+		OPEN
+			RULE CHAR('.') CHAR('.') CHAR('.') TREE("varargs")
+			RULE NT("abstract_declaration_list")
+		CLOSE
+	CLOSE OPTN
+
+	NT_DEF("parameter_declaration_list")
+	RULE NT("parameter_declaration")
+	OPEN
+		RULE CHAR(',')
+		OPEN
+			RULE CHAR('.') CHAR('.') CHAR('.') TREE("varargs")
+			RULE NT("parameter_declaration_list")
+		CLOSE
+	CLOSE OPTN
+
+	NT_DEF("ident_list")
+	RULE IDENT
+	OPEN
+		RULE CHAR(',')
+		OPEN
+			RULE CHAR('.') CHAR('.') CHAR('.') TREE("varargs")
+			RULE NT("ident_list")
+		CLOSE
+	CLOSE OPTN
+
+	NT_DEF("parameter_declaration")
+	RULE NT("type_specifier") NT("parameter_declaration") TREE("type")
+	RULE NT("declarator")
+	RULE NT("abstract_declarator")
+
+	NT_DEF("abstract_declaration")
+	RULE NT("type_specifier") NT("parameter_declaration") TREE("type")
+	RULE NT("abstract_declarator")
+
+	NT_DEF("abstract_declarator")
+	RULE CHAR('*')
+	OPEN
+		RULE KEYWORD("const") TREE("const")
+	CLOSE OPTN NT("abstract_declarator") TREE("abs_pointdecl")
+	RULE CHAR('(') NT("abstract_declarator") CHAR(')') TREE("abs_brackets")
+	RULE
+	REC_RULE CHAR('[') NT("constant_expr") OPTN CHAR(']') TREE("abs_array")
+	REC_RULE CHAR('(') NT("parameter_declaration_list") CHAR(')') TREE("abs_func")
+
+	NT_DEF("initializer")
+	RULE NT("assignment_expr")
+	RULE CHAR('{') NT("initializer") CHAIN(",") CHAR(',') OPTN CHAR('}') TREE("initializer")
+
+	NT_DEF("decl_or_stat")
+	RULE NT("declaration") SEQL OPTN NT("statement") SEQL OPTN
+
+	NT_DEF("statement")
+	RULE
+	OPEN
+		RULE
+		OPEN
+			RULE IDENT
+			RULE KEYWORD("case") NT("constant_expr")
+			RULE KEYWORD("default")
+		CLOSE CHAR(':') NT("statement") TREE("label")
+		RULE CHAR('{') NT("decl_or_stat") CHAR('}') TREE("brackets")
+	CLOSE
+	RULE
+	OPEN
+		RULE NT("expr") OPTN CHAR(';')
+		RULE KEYWORD("if") WS CHAR('(') NT("expr") CHAR(')') NT("statement")
+		OPEN
+			RULE KEYWORD("else") NT("statement")
+		CLOSE OPTN TREE("if")
+		RULE KEYWORD("switch") WS CHAR('(') NT("expr") CHAR(')') NT("statement") TREE("switch")
+		RULE KEYWORD("while") WS CHAR('(') NT("expr") CHAR(')') NT("statement") TREE("while")
+		RULE KEYWORD("do") NT("statement") KEYWORD("while") WS CHAR('(') NT("expr") CHAR(')') CHAR(';') TREE("do")
+		RULE KEYWORD("for") WS CHAR('(') NT("expr") OPTN CHAR(';')
+		OPEN
+			RULE WS NT("expr")
+		CLOSE OPTN CHAR(';')
+		OPEN
+			RULE WS NT("expr")
+		CLOSE OPTN CHAR(')') NT("statement") TREE("for")
+		RULE KEYWORD("goto") IDENT CHAR(';') TREE("goto")
+		RULE KEYWORD("continue") CHAR(';') TREE("cont")
+		RULE KEYWORD("break") CHAR(';') TREE("break")
+		RULE KEYWORD("return") NT("expr") OPTN CHAR(';') TREE("ret")
+	CLOSE
+
+	NT_DEF("root")
+	RULE
+	OPEN
+		RULE NT("declaration")
+	CLOSE SEQL OPTN END
 }
 
 
 
 
 
-char *str_root,
-	 *str_nt_def,
-	 *str_ident,
-	 *str_rule,
-	 *str_opt,
-	 *str_seq,
-	 *str_list,
-	 *str_chain,
-	 *str_prim_elem,
-	 *str_string,
-	 *str_cstring,
-	 *str_int,
-	 *str_double,
-	 *str_char,
-	 *str_eof;
+
 
 
 
@@ -2752,5 +2853,15 @@ void out(Grammar *grammar)
 	CLOSE SEQ OPT G_EOF
 }
 #endif
+
+
+
+
+
+
+
+
+
+
 
 #endif
