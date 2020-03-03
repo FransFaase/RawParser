@@ -312,6 +312,7 @@ void element_print(FILE *f, element_p element)
 #define SEQ(S,E) element->sequence = TRUE; element->begin_seq_function = S; element->add_seq_function = E;
 #define OPT(F) element->optional = TRUE; element->add_skip_function = F;
 #define AVOID element->avoid = TRUE;
+#define SET_PS(F) element->set_pos = F;
 #define CHAR(C) _NEW_GR(rk_char) element->info.ch = C;
 #define CHARSET(F) _NEW_GR(rk_charset) element->info.char_set = MALLOC(char_set_t); element->add_char_function = F;
 #define ADD_CHAR(C) char_set_add_char(element->info.char_set, C);
@@ -1387,6 +1388,12 @@ void init_tree_node(tree_node_p tree_node, const char *type_name, void (*release
 	tree_node->column = 0;
 }
 
+void tree_node_set_pos(tree_node_p tree_node, text_pos_p ps)
+{
+	tree_node->line = ps->cur_line;
+	tree_node->column = ps->cur_column;
+}
+
 typedef struct tree_t *tree_p;
 struct tree_t
 {
@@ -1475,10 +1482,8 @@ bool add_child(result_p prev, result_p elem, result_p result)
 	result_assign_ref_counted(result, new_prev_child);
 }
 
-bool make_tree(const result_p rule_result, void* data, result_p result)
+tree_p make_tree_with_children(const char* name, prev_child_p children)
 {
-	prev_child_p children = (prev_child_p)rule_result;
-	const char *name = (const char*)data;
 	tree_p tree = malloc_tree(name);
 	prev_child_p child;
 	int i = 0;
@@ -1492,6 +1497,13 @@ bool make_tree(const result_p rule_result, void* data, result_p result)
 		result_init(&tree->children[i]);
 		result_assign(&tree->children[i], (result_p)child->child);
 	}
+}
+
+bool make_tree(const result_p rule_result, void* data, result_p result)
+{
+	prev_child_p children = (prev_child_p)rule_result;
+	const char *name = (const char*)data;
+	tree_p tree = make_tree_with_children(name, children);
 	result_assign_ref_counted(result, tree);
 }
 
@@ -1605,19 +1617,16 @@ char *string(char *s)
 
 /*  Parsing an identifier  */
 
+/*  Data structure needed during parsing.
+    Only the first 64 characters of the identifier will be significant. */
+
 typedef struct ident_data
 {
 	ref_counted_base_t _base;
 	char ident[65];
 	int len;
+	text_pos_t ps;
 } *ident_data_p;
-
-typedef struct ident_t *ident_p;
-struct ident_t
-{
-	tree_node_t _node;
-	const char *name;
-};
 
 bool ident_add_char(result_p prev, char ch, result_p result)
 {
@@ -1638,10 +1647,25 @@ bool ident_add_char(result_p prev, char ch, result_p result)
 	}
 }
 
+void ident_set_pos(result_p result, text_pos_p ps)
+{
+	if (result->data != 0)
+		((ident_data_p)result->data)->ps = *ps;
+}
+
 void pass_to_sequence(result_p prev, result_p seq)
 {
 	result_assign(seq, prev);
 }
+
+/*  Ident tree node structure */
+
+typedef struct ident_t *ident_p;
+struct ident_t
+{
+	tree_node_t _node;
+	const char *name;
+};
 
 const char *ident_type = "ident";
 
@@ -1656,10 +1680,12 @@ bool create_ident_tree(const result_p rule_result, void* data, result_p result)
 	ident_data->ident[ident_data->len] = '\0';
 	ident_p ident = MALLOC(struct ident_t);
 	init_tree_node(&ident->_node, ident_type, NULL);
+	tree_node_set_pos(&ident->_node, &ident_data->ps);
 	ident->name = string(ident_data->ident);
 	result_assign_ref_counted(result, ident);
 }
 
+/*  Ident grammar  */
 
 void ident_grammar(non_terminal_p *all_nt)
 {
@@ -1667,7 +1693,7 @@ void ident_grammar(non_terminal_p *all_nt)
 	
 	NT_DEF("ident")
 		RULE
-			CHARSET(ident_add_char) ADD_RANGE('a', 'z') ADD_RANGE('A', 'Z') ADD_CHAR('_') 
+			CHARSET(ident_add_char) ADD_RANGE('a', 'z') ADD_RANGE('A', 'Z') ADD_CHAR('_') SET_PS(ident_set_pos)
 			CHARSET(ident_add_char) ADD_RANGE('a', 'z') ADD_RANGE('A', 'Z') ADD_CHAR('_') ADD_RANGE('0', '9') SEQ(pass_to_sequence, use_sequence_result)
 			END_FUNCTION(create_ident_tree)
 }
@@ -1698,6 +1724,8 @@ void test_parse_ident(non_terminal_p *all_nt, const char *input)
 		else
 		{
 			tree_node_p tree_node = (tree_node_p)result.data;
+			if (tree_node->line != 1 && tree_node->column != 1)
+				fprintf(stderr, "WARNING: tree node position %d:%d is not 1:1\n", tree_node->line, tree_node->column);
 			if (tree_node->type_name != ident_type)
 				fprintf(stderr, "ERROR: tree node is not of type ident_type\n");
 			else
@@ -1744,35 +1772,39 @@ int main(int argc, char *argv[])
 	return 0;
 }
 
-
 #if 0
 
 bool equal_string(result_p result, const void *argument)
 {
 	const char *keyword_name = (const char*)argument;
-	/* TODO: Implement */
-	return FALSE;
+	return    result->data != NULL
+		   && ((tree_node_p)result->data)->type_name == ident_type
+		   && strcmp(((ident_p)result->data)->name, keyword_name) == 0;
 }
 
 bool not_a_keyword(result_p result, const void *argument)
 {
-	//string();
 	return *keyword_state == 0;
 }
 
+const char* list_type = "list";
+
 bool add_seq_as_list(result_p prev, result_p seq, result_p result)
 {
-	/* TODO: Implement */
-	return FALSE;
+	prev_child_p new_prev_child = malloc_prev_child();
+	new_prev_child->prev = (prev_child_p)prev->data;
+	new_prev_child->child = make_tree_with_children(list_type, (prev_child_p)seq->data);
+	result_assign_ref_counted(result, new_prev_child);
+	return TRUE;
 }
 
-#define NT(S) NTF(S, 0)
+#define NT(S) NTF(S, add_child)
 #define PASS alternative->end_function = pass_tree;
 #define TREE(N) alternative->end_function = make_tree; alternative->end_data = N;
 #define KEYWORD(K) NTF("ident", 0) element->condition = equal_string; element->condition_argument = string(K); *keyword_state = 1;
-#define CHAIN(X)
+#define CHAIN(X)  /* TODO */
 #define OPTN OPT(0)
-#define IDENT NTF("ident", 0) element->condition = not_a_keyword;
+#define IDENT NTF("ident", add_child) element->condition = not_a_keyword;
 #define WS NT("white_space")
 #define SEQL SEQ(0, add_seq_as_list)
 
@@ -2099,38 +2131,6 @@ void c_grammar(non_terminal_p *all_nt)
 
 
 
-/*
-   Result
-   ~~~~~~
-   
-*/
-
-typedef struct result_t result_t, *result_p
-struct result_t {
-	// Usually contains a union of possible values
-  
-	// It is reference counted
-	longword ref_count;
-};
-
-void free_result(result_p *result)
-{
-	// Your code for freeing
-	
-	result = NULL;
-}
-
-/*
-	Parsing procedures
-	~~~~~~~~~~~~~~~~~~
-	The following section of the code contains the
-	procedures which implement the back-tracking 
-	recursive descended parser.
-*/
-
-int grammar_level = 2;
-char keyword_flag = 1,
-	 new_keyword_flag = 2;
 
 /*
 	Error reporting
@@ -2202,283 +2202,7 @@ void print_last_pos()
 
 
 
-/*
-	Symbol tables
-	~~~~~~~~~~~~~
-	The following section of code deals with the storage of
-	symbol tables, and resolving all identifiers with their
-	definitions.
-*/
 
-typedef struct ident_def_t ident_def_t, *ident_def_p;
-typedef struct context_entry_t context_entry_t, *context_entry_p;
-
-struct ident_def_t
-{	ident_def_p next;
-	tree_p tree;
-};
-
-struct context_entry_t
-{	context_entry_p next;
-	char *ident_name;
-	char *ident_class;
-	ident_def_p defs;
-};
-
-
-		
-
-/*
-	Initialization
-	~~~~~~~~~~~~~~
-*/
-
-void initialize()
-{
-	/* init strings */
-	str_root = string("root");
-	str_nt_def = string("nt_def");
-	str_ident = string("ident");
-	str_identalone = string("identalone");
-	str_identdef = string("identdef");
-	str_identdefadd = string("identdefadd");
-	str_identuse = string("identuse");
-	str_identfield = string("identfield");
-	str_rule = string("rule");
-	str_opt = string("opt");
-	str_seq = string("seq");
-	str_list = string("list");
-	str_chain = string("chain");
-	str_prim_elem = string("prim_elem");
-	str_string = string("string");
-	str_cstring = string("cstring");
-	str_int = string("int");
-	str_double = string("double");
-	str_char = string("char");
-	str_eof = string("eof");
-
-	/* init terminal types */
-	add_literal_terminal(str_string, accept_string);
-	add_string_terminal(str_cstring, accept_cstring);
-	add_int_terminal(str_int, accept_int);
-	add_double_terminal(str_double, accept_double);
-	add_ident_terminal(str_ident, accept_ident);
-	add_char_terminal(str_char, accept_char);
-
-	/* for Transact-SQL: */
-	add_string_terminal(string("sql_string_single"), accept_single_sql_string);
-	add_string_terminal(string("sql_string_double"), accept_double_sql_string);
-	add_ident_terminal(string("sql_ident"), accept_sql_ident);	
-	add_ident_terminal(string("sql_vident"), accept_sql_var_ident);	
-	add_ident_terminal(string("sql_sysident"), accept_sql_sysvar_ident);	
-	add_ident_terminal(string("sql_label"), accept_sql_label_ident);	
-}
-
-/*
-	Command line interface
-	~~~~~~~~~~~~~~~~~~~~~~
-	The main procedure implements the command-line interface for IParse.
-*/
-
-int main(int argc, char *argv[])
-{   tree_p tree = NULL;
-	int i;
-
-	if (argc == 1)
-	{   printf("Usage: %s <grammar-file> <input-file>\n"
-			   "\n"
-			   "  options\n"
-			   "   -p		print parse tree\n"
-			   "   -o <fn>   ouput tree to C file\n"
-			   "   +ds	   debug scanning (full)\n"
-			   "   +dss	  debug scanning (normal)\n"
-			   "   -ds	   no debug scanning\n"
-			   "   +dp	   debug parsing\n"
-			   "   -dp	   no debug parsing\n"
-			   "   +dn	   debug non-terminals\n"
-			   "   -dn	   no debug non-terminals\n", argv[0]);
-		return 0;
-	}
-
-	fprintf(stderr, "Iparser, Version: %s\n", VERSION);
-
-	initialize();
-	
-	init_IParse_grammar(&tree);
-
-	for (i = 1; i < argc; i++)
-	{   char *arg = argv[i];
- 
-		printf("Processing: %s\n", arg); 
-
-		if (!strcmp(arg, "+g"))
-			grammar_level++;
-		if (!strcmp(arg, "-p"))
-		{   
-			printf("tree:\n");
-			print_tree(stdout, tree, FALSE);
-			printf("\n--------------\n");
-		}
-		else if (!strcmp(arg, "-pc"))
-		{   
-			printf("tree:\n");
-			print_tree(stdout, tree, TRUE);
-			printf("\n--------------\n");
-		}
-		else if (!strcmp(arg, "-o") && i + 1 < argc)
-		{
-			char *file_name = argv[++i];
-			FILE *fout = !strcmp(file_name, "-") 
-						 ? stdout : fopen(file_name, "w");
-
-			if (fout != NULL)
-			{   char *dot = strstr(file_name, ".");
-				if (dot)
-					*dot = '\0';
-
-				print_tree_to_c(fout, tree, file_name);
-				fclose(fout);
-			}
-			else
-			{   printf("Cannot open: %s\n", file_name);
-				return 0;
-			}
-		}
-		else if (!strcmp(arg, "+ds"))
-			debug_scan = 2;
-		else if (!strcmp(arg, "+dss"))
-			debug_scan = 1;
-		else if (!strcmp(arg, "-ds"))
-			debug_scan = 0;
-		else if (!strcmp(arg, "+dp"))
-			debug_parse = TRUE;
-		else if (!strcmp(arg, "-dp"))
-			debug_parse = FALSE;
-		else if (!strcmp(arg, "+dn"))
-			debug_nt = TRUE;
-		else if (!strcmp(arg, "-dn"))
-			debug_nt = FALSE;
-		else
-		{   FILE *fin = fopen(arg, "r");
-
-			if (fin != NULL)
-			{   tree_p new_tree = NULL;
-
-				init_scan(fin);
-
-				make_all_nt(tree);
-				tree_release(&tree);
-			   
-				init_solutions();
-
-				if (!parse_nt(find_nt(str_root), &new_tree))
-				{   print_last_pos();
-					return 0;
-				}
-			   	tree_assign(&tree, new_tree);
-			   	tree_release(&new_tree);
-
-				free_solutions();
-
-				keyword_flag *= 2;
-				new_keyword_flag *= 2;
-
-				grammar_level--;
-
-				fclose(fin);
-			}
-			else
-			{   printf("Cannot open: %s\n", arg);
-				return 0;
-			}
-		}
-	}
-	tree_release(&tree);
-	if (alloced_trees != 0)
-		printf("Error: alloced trees = %ld\n", alloced_trees);
-	return 0;
-} 
-
-/*
-	Building a hard-code parser
-	~~~~~~~~~~~~~~~~~~~~~~~~~~~
-	
-	IParse implements an interpretting parser. It can also
-	be used to implement a parser for a fixed grammar. (Actually,
-	that is the way how the parser of the input grammar is
-	implemented.)
-	
-	In case your languages uses different lexical rules for
-	the terminals, you will have to write your own scanning
-	routines for all these terminals. For this you will have
-	to modify this file. Read the sections on scanning for
-	information how to do this.
-	
-	The next step for building a parser consist of writing
-	the grammar, for example the file 'lang.gr'. To verify this
-	grammar on some input file, for example 'test.lang' call IParse
-	from the command line in the following manner:
-	
-		IParse lang.gr test.gr -p
-		
-	Once the grammar is correct, call IParse from the command line
-	in the following manner:
-	
-		IParse lang.gr -o lang_grammar.c
-		
-	This will produce the procedure init_lang_grammar in the file
-	lang_grammar.c. Now make a copy of this file and rename it to
-	'LangParse.c'. In this copy replace init_IParse_grammar with 
-	the code of init_lang_grammar. After 'LangParse.c' has been
-	compiled, you can verify its working by calling it from the
-	command line with:
-	
-		LangParse test.gr -p
-		
-	As a final step, the main procedure can be replaced by a
-	procedure which parses a given input file to an Abstract Program
-	Tree. An example of such a procedure is:
-	
-	bool parse_lang(FILE *fin, tree_p *r_tree)
-	{   tree_p lang_grammar_tree = NULL;
-		bool okay;
-
-		initialize();
-		
-		init_lang_grammar(&lang_grammar_tree);
-
-		make_all_nt(lang_grammar_tree);
-		tree_release(&lang_grammar_tree);
-			   
-		init_solutions();
-
-		init_scan(fin);
-
-		okay = parse_nt(find_nt(str_root), r_tree);
-		
-		free_solutions();
-		fclose(fin);
-		
-		if (!okay)		
-		{   print_last_pos();
-			return FALSE;
-		}
-
-		fclose(fin);
-
-		return TRUE;
-	}
-
-	This gives you a procedure which will parse a given file
-	according to your grammar 'lang.gr' into an Abstract Program Tree,
-	in which all identifiers have been resolved. Errors are
-	reported on the standard output. If you want them to be
-	reported differently, replace the procedure print_last_pos
-	by something more fitting.
-	If you would like to parse from a string buffer instead of
-	from a file, you can replace init_scan by your own initialization
-	routine.
-*/
 
 
 #if NEW
