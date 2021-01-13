@@ -1,4 +1,4 @@
-/* RawParser -- A 'raw' parser         Copyright (C) 2019 Frans Faase
+/* RawParser -- A 'raw' parser         Copyright (C) 2021 Frans Faase
 
    This shows how to implement a grammar driven, scannerless parser in C
    in a number of incremental steps going from simple to complex.
@@ -324,15 +324,14 @@ struct element
 	- Function to create new element
 */
 
-element_p new_element(enum element_kind_t kind)
+void element_init(element_p element, enum element_kind_t kind)
 {
-	element_p element = MALLOC(struct element);
+	element->kind = kind;
 	element->next = NULL;
 	element->optional = FALSE;
 	element->sequence = FALSE;
 	element->avoid = FALSE;
 	element->chain_rule = NULL;
-	element->kind = kind;
 	element->add_char_function = 0;
 	element->condition = 0;
 	element->condition_argument = NULL;
@@ -341,6 +340,12 @@ element_p new_element(enum element_kind_t kind)
 	element->begin_seq_function = 0;
 	element->add_seq_function = 0;
 	element->set_pos = 0;
+}
+	
+element_p new_element(enum element_kind_t kind)
+{
+	element_p element = MALLOC(struct element);
+	element_init(element, kind);
 	return element;
 }
 
@@ -495,7 +500,7 @@ void element_print(FILE *f, element_p element)
 #define NTF(N,F) _NEW_GR(rk_nt) element->info.non_terminal = find_nt(N, _nt); element->add_function = F;
 #define END _NEW_GR(rk_end)
 #define SEQ(S,E) element->sequence = TRUE; element->begin_seq_function = S; element->add_seq_function = E;
-#define CHAIN(S, E) SEQ(S,E) { element_p* ref_element = &element->chain_rule; element_p element;
+#define CHAIN element_p* ref_element = &element->chain_rule; element_p element;
 #define OPT(F) element->optional = TRUE; element->add_skip_function = F;
 #define AVOID element->avoid = TRUE;
 #define SET_PS(F) element->set_pos = F;
@@ -504,8 +509,7 @@ void element_print(FILE *f, element_p element)
 #define ADD_CHAR(C) char_set_add_char(element->info.char_set, C);
 #define ADD_RANGE(F,T) char_set_add_range(element->info.char_set, F, T);
 #define END_FUNCTION(F) rules->end_function = F;
-#define OPEN _NEW_GR(rk_grouping) element->info.rules = new_rule(); { rules_p* ref_rule = &element->info.rules; rules_p rules; element_p* ref_element; element_p element;
-#define CLOSE }
+#define GROUPING _NEW_GR(rk_grouping) element->info.rules = new_rule(); rules_p* ref_rule = &element->info.rules; rules_p rules; element_p* ref_element; element_p element;
 		
 
 
@@ -516,8 +520,8 @@ void element_print(FILE *f, element_p element)
 	In this example, white space does not have a result, thus all function
 	pointers can be left 0. White space is defined as a (possible empty)
 	sequence of white space characters, the single line comment and the
-	traditional C-comment. 'OPEN' and 'CLOSE' are used to define a grouping.
-	The grouping contains three rules.
+	traditional C-comment. '{ GROUPING' and '}' are used to define a
+	grouping. The grouping contains three rules.
 */
 
 void white_space_grammar(non_terminal_dict_p *all_nt)
@@ -526,7 +530,7 @@ void white_space_grammar(non_terminal_dict_p *all_nt)
 	
 	NT_DEF("white_space")
 		RULE
-			OPEN
+			{ GROUPING
 				RULE /* for the usual white space characters */
 					CHARSET(0) ADD_CHAR(' ') ADD_CHAR('\t') ADD_CHAR('\n')
 				RULE /* for the single line comment starting with two slashes */
@@ -540,7 +544,7 @@ void white_space_grammar(non_terminal_dict_p *all_nt)
 					CHARSET(0) ADD_RANGE(' ', 255) ADD_CHAR('\t') ADD_CHAR('\n') SEQ(0, 0) OPT(0) AVOID
 					CHAR('*')
 					CHAR('/')
-			CLOSE SEQ(0, 0) OPT(0)
+			} SEQ(0, 0) OPT(0)
 }
 
 
@@ -2094,7 +2098,6 @@ bool add_seq_as_list(result_p prev, result_p seq, result_p result)
 #define OPTN OPT(0)
 #define IDENT NTF("ident", add_child) element->condition = not_a_keyword; WS
 #define SEQL SEQ(0, add_seq_as_list)
-#define CHAINL CHAIN(0, add_seq_as_list)
 #define REC_RULEC REC_RULE(rec_add_child);
 
 void c_grammar(non_terminal_dict_p *all_nt)
@@ -2115,7 +2118,7 @@ void c_grammar(non_terminal_dict_p *all_nt)
 	NT_DEF("postfix_expr")
 		RULE NTP("primary_expr")
 		REC_RULEC CHAR('[') WS NT("expr") CHAR(']') TREE("arrayexp")
-		REC_RULEC CHAR('(') WS NT("assignment_expr") CHAINL CHAR(',') WS CLOSE OPTN CHAR(')') TREE("call")
+		REC_RULEC CHAR('(') WS NT("assignment_expr") SEQL { CHAIN CHAR(',') WS } OPTN CHAR(')') TREE("call")
 		REC_RULEC CHAR('.') WS IDENT TREE("field")
 		REC_RULEC CHAR('-') CHAR('>') WS IDENT TREE("fieldderef")
 		REC_RULEC CHAR('+') CHAR('+') WS TREE("post_inc")
@@ -2131,10 +2134,10 @@ void c_grammar(non_terminal_dict_p *all_nt)
 		RULE CHAR('~') WS NT("cast_expr") TREE("invert")
 		RULE CHAR('!') WS NT("cast_expr") TREE("not")
 		RULE KEYWORD("sizeof")
-		OPEN
+		{ GROUPING
 			RULE NT("unary_expr") TREE("typeof")
 			RULE CHAR('(') WS IDENT CHAR(')') WS
-		CLOSE TREE("sizeof")
+		} TREE("sizeof")
 		RULE NTP("postfix_expr")
 
 	NT_DEF("cast_expr")
@@ -2208,32 +2211,32 @@ void c_grammar(non_terminal_dict_p *all_nt)
 		RULE CHAR('^') CHAR('=') WS TREE("exor_ass")
 
 	NT_DEF("expr")
-		RULE NT("assignment_expr") CHAINL CHAR(',') WS CLOSE PASS
+		RULE NT("assignment_expr") SEQL { CHAIN CHAR(',') WS } PASS
 
 	NT_DEF("constant_expr")
 		RULE NT("conditional_expr") PASS
 
 	NT_DEF("declaration")
 		RULE
-		OPEN
+		{ GROUPING
 			RULE NT("storage_class_specifier")
 			RULE NT("type_specifier")
-		CLOSE SEQL OPTN AVOID
-		OPEN
+		} SEQL OPTN AVOID
+		{ GROUPING
 			RULE
-			OPEN
+			{ GROUPING
 				RULE NT("declarator")
-				OPEN
+				{ GROUPING
 					RULE WS CHAR('=') WS NT("initializer")
-				CLOSE OPTN
-			CLOSE CHAINL CHAR(',') WS CLOSE OPTN CHAR(';') TREE("decl")
+				} OPTN
+			} SEQL { CHAIN CHAR(',') WS } OPTN CHAR(';') TREE("decl")
 			RULE NT("func_declarator") CHAR('(') NT("parameter_declaration_list") OPTN CHAR(')')
-			OPEN
+			{ GROUPING
 				RULE CHAR(';')
 				RULE CHAR('{') NT("decl_or_stat") CHAR('}')
-			CLOSE TREE("new_style")
+			} TREE("new_style")
 			RULE NT("func_declarator") CHAR('(') NT("ident_list") OPTN CHAR(')') NT("declaration") SEQL OPTN CHAR('{') NT("decl_or_stat") CHAR('}') TREE("old_style")
-		CLOSE
+		}
 
 	NT_DEF("storage_class_specifier")
 		RULE KEYWORD("typedef") TREE("typedef")
@@ -2260,59 +2263,59 @@ void c_grammar(non_terminal_dict_p *all_nt)
 
 	NT_DEF("struct_or_union_specifier")
 		RULE KEYWORD("struct") IDENT CHAR('{')
-		OPEN
+		{ GROUPING
 			RULE NT("struct_declaration")
-		CLOSE SEQL CHAR('}') TREE("struct_d")
+		} SEQL CHAR('}') TREE("struct_d")
 		RULE KEYWORD("struct") CHAR('{')
-		OPEN
+		{ GROUPING
 			RULE NT("struct_declaration")
-		CLOSE SEQL CHAR('}') TREE("struct_n")
+		} SEQL CHAR('}') TREE("struct_n")
 		RULE KEYWORD("struct") IDENT TREE("struct")
 		RULE KEYWORD("union") IDENT CHAR('{')
-		OPEN
+		{ GROUPING
 			RULE NT("struct_declaration")
-		CLOSE SEQL CHAR('}') TREE("union_d")
+		} SEQL CHAR('}') TREE("union_d")
 		RULE KEYWORD("union") CHAR('{')
-		OPEN
+		{ GROUPING
 			RULE NT("struct_declaration")
-		CLOSE SEQL CHAR('}') TREE("union_n")
+		} SEQL CHAR('}') TREE("union_n")
 		RULE KEYWORD("union") IDENT TREE("union")
 
 	NT_DEF("struct_declaration")
 		RULE NT("type_specifier") NT("struct_declaration") TREE("type")
-		RULE NT("struct_declarator") CHAINL CHAR(',') WS CLOSE CHAR(';') TREE("strdec")
+		RULE NT("struct_declarator") SEQL { CHAIN CHAR(',') WS } CHAR(';') TREE("strdec")
 
 	NT_DEF("struct_declarator")
 		RULE NT("declarator")
-		OPEN
+		{ GROUPING
 			RULE CHAR(':') NT("constant_expr")
-		CLOSE OPTN TREE("record_field")
+		} OPTN TREE("record_field")
 
 	NT_DEF("enum_specifier")
 		RULE KEYWORD("enum") IDENT
-		OPEN
-			RULE CHAR('{') NT("enumerator") CHAINL CHAR(',') WS CLOSE CHAR('}')
-		CLOSE TREE("enum")
+		{ GROUPING
+			RULE CHAR('{') NT("enumerator") SEQL { CHAIN CHAR(',') WS } CHAR('}')
+		} TREE("enum")
 
 	NT_DEF("enumerator")
 		RULE IDENT
-		OPEN
+		{ GROUPING
 			RULE CHAR('=') NT("constant_expr")
-		CLOSE OPTN TREE("enumerator")
+		} OPTN TREE("enumerator")
 
 	NT_DEF("func_declarator")
 		RULE CHAR('*')
-		OPEN
+		{ GROUPING
 			RULE KEYWORD("const") TREE("const")
-		CLOSE OPTN NT("func_declarator") TREE("pointdecl")
+		} OPTN NT("func_declarator") TREE("pointdecl")
 		RULE KEYWORD("(") NT("func_declarator") CHAR(')')
 		RULE IDENT
 
 	NT_DEF("declarator")
 		RULE CHAR('*')
-		OPEN
+		{ GROUPING
 			RULE KEYWORD("const") TREE("const")
-		CLOSE OPTN NT("declarator") TREE("pointdecl")
+		} OPTN NT("declarator") TREE("pointdecl")
 		RULE CHAR('(') NT("declarator") CHAR(')') TREE("brackets")
 		RULE WS IDENT
 		REC_RULEC CHAR('[') NT("constant_expr") OPTN CHAR(']') TREE("array")
@@ -2320,33 +2323,33 @@ void c_grammar(non_terminal_dict_p *all_nt)
 
 	NT_DEF("abstract_declaration_list")
 		RULE NT("abstract_declaration")
-		OPEN
+		{ GROUPING
 			RULE CHAR(',')
-			OPEN
+			{ GROUPING
 				RULE CHAR('.') CHAR('.') CHAR('.') TREE("varargs")
 				RULE NT("abstract_declaration_list")
-			CLOSE
-		CLOSE OPTN
+			}
+		} OPTN
 
 	NT_DEF("parameter_declaration_list")
 		RULE NT("parameter_declaration")
-		OPEN
+		{ GROUPING
 			RULE CHAR(',')
-			OPEN
+			{ GROUPING
 				RULE CHAR('.') CHAR('.') CHAR('.') TREE("varargs")
 				RULE NT("parameter_declaration_list")
-			CLOSE
-		CLOSE OPTN
+			}
+		} OPTN
 
 	NT_DEF("ident_list")
 		RULE IDENT
-		OPEN
+		{ GROUPING
 			RULE CHAR(',')
-			OPEN
+			{ GROUPING
 				RULE CHAR('.') CHAR('.') CHAR('.') TREE("varargs")
 				RULE NT("ident_list")
-			CLOSE
-		CLOSE OPTN
+			}
+		} OPTN
 
 	NT_DEF("parameter_declaration")
 		RULE NT("type_specifier") NT("parameter_declaration") TREE("type")
@@ -2359,9 +2362,9 @@ void c_grammar(non_terminal_dict_p *all_nt)
 
 	NT_DEF("abstract_declarator")
 		RULE CHAR('*')
-		OPEN
+		{ GROUPING
 			RULE KEYWORD("const") TREE("const")
-		CLOSE OPTN NT("abstract_declarator") TREE("abs_pointdecl")
+		} OPTN NT("abstract_declarator") TREE("abs_pointdecl")
 		RULE CHAR('(') NT("abstract_declarator") CHAR(')') TREE("abs_brackets")
 		RULE
 		REC_RULEC CHAR('[') NT("constant_expr") OPTN CHAR(']') TREE("abs_array")
@@ -2369,50 +2372,50 @@ void c_grammar(non_terminal_dict_p *all_nt)
 
 	NT_DEF("initializer")
 		RULE NT("assignment_expr")
-		RULE CHAR('{') NT("initializer") CHAINL CHAR(',') WS CLOSE CHAR(',') OPTN CHAR('}') TREE("initializer")
+		RULE CHAR('{') NT("initializer") SEQL { CHAIN CHAR(',') WS } CHAR(',') OPTN CHAR('}') TREE("initializer")
 
 	NT_DEF("decl_or_stat")
 		RULE NT("declaration") SEQL OPTN NT("statement") SEQL OPTN
 
 	NT_DEF("statement")
 		RULE
-		OPEN
+		{ GROUPING
 			RULE
-			OPEN
+			{ GROUPING
 				RULE IDENT
 				RULE KEYWORD("case") NT("constant_expr")
 				RULE KEYWORD("default")
-			CLOSE CHAR(':') NT("statement") TREE("label")
+			} CHAR(':') NT("statement") TREE("label")
 			RULE CHAR('{') NT("decl_or_stat") CHAR('}') TREE("brackets")
-		CLOSE
+		}
 		RULE
-		OPEN
+		{ GROUPING
 			RULE NT("expr") OPTN CHAR(';')
 			RULE KEYWORD("if") WS CHAR('(') NT("expr") CHAR(')') NT("statement")
-			OPEN
+			{ GROUPING
 				RULE KEYWORD("else") NT("statement")
-			CLOSE OPTN TREE("if")
+			} OPTN TREE("if")
 			RULE KEYWORD("switch") WS CHAR('(') NT("expr") CHAR(')') NT("statement") TREE("switch")
 			RULE KEYWORD("while") WS CHAR('(') NT("expr") CHAR(')') NT("statement") TREE("while")
 			RULE KEYWORD("do") NT("statement") KEYWORD("while") WS CHAR('(') NT("expr") CHAR(')') CHAR(';') TREE("do")
 			RULE KEYWORD("for") WS CHAR('(') NT("expr") OPTN CHAR(';')
-			OPEN
+			{ GROUPING
 				RULE WS NT("expr")
-			CLOSE OPTN CHAR(';')
-			OPEN
+			} OPTN CHAR(';')
+			{ GROUPING
 				RULE WS NT("expr")
-			CLOSE OPTN CHAR(')') NT("statement") TREE("for")
+			} OPTN CHAR(')') NT("statement") TREE("for")
 			RULE KEYWORD("goto") IDENT CHAR(';') TREE("goto")
 			RULE KEYWORD("continue") CHAR(';') TREE("cont")
 			RULE KEYWORD("break") CHAR(';') TREE("break")
 			RULE KEYWORD("return") NT("expr") OPTN CHAR(';') TREE("ret")
-		CLOSE
+		}
 
 	NT_DEF("root")
 		RULE
-		OPEN
+		{ GROUPING
 			RULE NT("declaration")
-		CLOSE SEQL OPTN END
+		} SEQL OPTN END
 }
 
 
