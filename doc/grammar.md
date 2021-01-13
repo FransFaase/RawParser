@@ -110,7 +110,7 @@ struct element
 		...
 		char_set_p char_set;         /* rk_charset: Pointer to character set definition */
 	} info;
-}
+};
 ```
 
 We also add a function to initialize an element:
@@ -186,7 +186,7 @@ struct element
 		...
 		rules_p rules;               /* rk_grouping: Pointer to the rules */
 	} info;
-}
+};
 ```
 
 ## A grammar
