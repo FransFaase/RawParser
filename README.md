@@ -47,4 +47,5 @@ style with fragments of code that are extended in steps as described in
 [Literate programming with Markdown](https://www.iwriteiam.nl/D2101.html#13).
 See:
 
-*  [Representation of the grammar](doc/grammar.md)
+*  [Representation of the grammar](docs/grammar.md)
+*  [Parser](docs/parser.md)
