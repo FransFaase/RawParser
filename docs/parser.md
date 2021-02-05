@@ -7,18 +7,18 @@
 ```c
 struct text_pos
 {
-	longword pos;     /* Positive offset from the start of the file */
-	word cur_line;    /* Line number (1-based) with the position */
-	word cur_column;  /* Column number (1-based) with the position */
+	size_t pos;               /* Positive offset from the start of the file */
+	unsigned int cur_line;    /* Line number (1-based) with the position */
+	unsigned int cur_column;  /* Column number (1-based) with the position */
 };
 
 typedef struct
 {
-	const char *buffer;   /* String containting the input text */
-	longword buffer_len;  /* Length of the input text */
-	text_pos_t pos;       /* Current position in the input text */
-	const char *info;     /* Contents starting at the current position */
-	word tab_size;        /* Tabs are on multiples of the tab_size */
+	const char *buffer;     /* String containting the input text */
+	size_t buffer_len;      /* Length of the input text */
+	text_pos_t pos;         /* Current position in the input text */
+	const char *info;       /* Contents starting at the current position */
+	unsigned int tab_size;  /* Tabs are on multiples of the tab_size */
 } text_buffer_t, *text_buffer_p;
 
 void text_buffer_assign_string(text_buffer_p text_buffer, const char* text);
