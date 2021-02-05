@@ -59,20 +59,18 @@ typedef int bool;
 #define TRUE 1
 #define FALSE 0
 
-typedef unsigned long longword;
-typedef unsigned short word;
 typedef unsigned char byte;
 
 #if TRACE_ALLOCATIONS
 
-void *my_malloc(size_t size, longword line)
+void *my_malloc(size_t size, unsigned int line)
 {
 	void *p = malloc(size);
 	fprintf(stdout, "At line %lu: allocated %lu bytes %p\n", line, size, p);
 	return p;
 }
 
-void my_free(void *p, longword line)
+void my_free(void *p, unsigned int line)
 {
 	fprintf(stdout, "At line %lu: freed %p\n", line, p);
 	free(p);
@@ -845,18 +843,18 @@ bool number_add_char(result_p prev, char ch, result_p result)
 
 struct text_pos
 {
-	longword pos;     /* Positive offset from the start of the file */
-	word cur_line;    /* Line number (1-based) with the position */
-	word cur_column;  /* Column number (1-based) with the position */
+	size_t pos        ;       /* Positive offset from the start of the file */
+	unsigned int cur_line;    /* Line number (1-based) with the position */
+	unsigned int cur_column;  /* Column number (1-based) with the position */
 };
 
 typedef struct
 {
-	const char *buffer;   /* String containting the input text */
-	longword buffer_len;  /* Length of the input text */
-	text_pos_t pos;       /* Current position in the input text */
-	const char *info;     /* Contents starting at the current position */
-	word tab_size;        /* Tabs are on multiples of the tab_size */
+	const char *buffer;     /* String containting the input text */
+	size_t buffer_len;      /* Length of the input text */
+	text_pos_t pos;         /* Current position in the input text */
+	const char *info;       /* Contents starting at the current position */
+	unsigned int tab_size;  /* Tabs are on multiples of the tab_size */
 } text_buffer_t, *text_buffer_p;
 
 void text_buffer_assign_string(text_buffer_p text_buffer, const char* text)
@@ -959,7 +957,7 @@ typedef struct
 {
 	text_buffer_p text_buffer;
 	const char *current_nt;
-	cache_item_p (*cache_hit_function)(void *cache, longword pos, const char *nt);
+	cache_item_p (*cache_hit_function)(void *cache, size_t pos, const char *nt);
 	void *cache;
 } parser_t, *parser_p;
 
@@ -1136,8 +1134,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 	}
 
 	/* Store the current position */
-	text_pos_t sp;
-	sp = parser->text_buffer->pos;
+	text_pos_t sp = parser->text_buffer->pos;
 	
 	/* If the first element is optional and should be avoided, first an attempt
 	   will be made to skip the element and parse the remainder of the rule */
@@ -1428,6 +1425,9 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 		DISP_RESULT(result);
 	}
 	
+	/* Store the current position */
+	text_pos_t sp = parser->text_buffer->pos;
+
 	/* If a chain rule is defined, try to parse it.*/
 	if (element->chain_rule != NULL)
 	{
@@ -1467,6 +1467,9 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 		DISP_RESULT(seq_elem);
 	}
 	
+	/* Failed to parse the next element of the sequence: reset the current position to the saved position. */
+	text_buffer_set_pos(parser->text_buffer, &sp);
+
 	/* In case of the avoid modifier, an attempt to parse the remained of the
 	   rule, was already made. So, only in case of no avoid modifier, attempt
 	   to parse the remainder of the rule */
@@ -1510,7 +1513,7 @@ struct solution
 typedef struct
 {
 	solution_p *sols;        /* Array of solutions at locations */
-	longword len;            /* Length of array (equal to length of input) */
+	size_t len;              /* Length of array (equal to length of input) */
 } solutions_t, *solutions_p;
 
 
@@ -1518,14 +1521,14 @@ void solutions_init(solutions_p solutions, text_buffer_p text_buffer)
 {
     solutions->len = text_buffer->buffer_len;
 	solutions->sols = MALLOC_N(solutions->len+1, solution_p);
-	longword i;
+	size_t i;
 	for (i = 0; i < solutions->len+1; i++)
 		solutions->sols[i] = NULL;
 }
 
 void solutions_free(solutions_p solutions)
 {
-	longword i;
+	size_t i;
 	for (i = 0; i < solutions->len+1; i++)
 	{	solution_p sol = solutions->sols[i];
 
@@ -1540,7 +1543,7 @@ void solutions_free(solutions_p solutions)
 	FREE(solutions->sols);
 }
 
-cache_item_p solutions_find(void *cache, longword pos, const char *nt)
+cache_item_p solutions_find(void *cache, size_t pos, const char *nt)
 {
 	solutions_p solutions = (solutions_p)cache;
 	solution_p sol;
@@ -1652,8 +1655,8 @@ typedef struct
 {
 	ref_counted_base_t _base;
 	const char *type_name;
-	word line;
-	word column;
+	unsigned int line;
+	unsigned int column;
 } tree_node_t, *tree_node_p;
 
 void init_tree_node(tree_node_p tree_node, const char *type_name, void (*release_node)(void *))
@@ -1675,7 +1678,7 @@ typedef struct tree_t *tree_p;
 struct tree_t
 {
 	tree_node_t _node;
-	word nr_children;
+	unsigned int nr_children;
 	result_t *children;
 };
 
@@ -1878,7 +1881,7 @@ char *ident_string(char *s)
 		if (node->state != 255)
 		{   char *cs = node->data.string;
 			hexa_hash_tree_p *children;
-			word i, v = 0;
+			unsigned short i, v = 0;
 
 			if (*cs == *s && strcmp(cs+1, s+1) == 0)
 			{   keyword_state = &node->state;
@@ -1902,7 +1905,7 @@ char *ident_string(char *s)
 			node->data.children = children;
 			*r_node = node;
 		}
-		{   word v;
+		{   unsigned short v;
 			if (*vs == '\0')
 			{   v = 0;
 				if (mode == 0)
@@ -1911,9 +1914,9 @@ char *ident_string(char *s)
 				}
 			}
 			else if (mode == 0)
-				v = ((word)*vs++) & 15;
+				v = ((unsigned short)*vs++) & 15;
 			else
-				v = ((word)*vs++) >> 4;
+				v = ((unsigned short)*vs++) >> 4;
 
 			r_node = &node->data.children[v];
 		}
@@ -2429,8 +2432,8 @@ struct fixed_string_ostream
 {
 	ostream_t ostream;
 	char *buffer;
-	word i;
-	word len;
+	unsigned int i;
+	unsigned int len;
 };
 
 void fixed_string_ostream_put(ostream_p ostream, char ch)
@@ -2439,7 +2442,7 @@ void fixed_string_ostream_put(ostream_p ostream, char ch)
 		((fixed_string_ostream_p)ostream)->buffer[((fixed_string_ostream_p)ostream)->i++] = ch;
 }
 
-void fixed_string_ostream_init(fixed_string_ostream_p ostream, char *buffer, int len)
+void fixed_string_ostream_init(fixed_string_ostream_p ostream, char *buffer, unsigned int len)
 {
 	ostream->ostream.put = fixed_string_ostream_put;
 	ostream->buffer = buffer;
