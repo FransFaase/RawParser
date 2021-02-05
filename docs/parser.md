@@ -21,6 +21,7 @@ typedef struct
 	word tab_size;        /* Tabs are on multiples of the tab_size */
 } text_buffer_t, *text_buffer_p;
 
+void text_buffer_assign_string(text_buffer_p text_buffer, const char* text);
 void text_buffer_next(text_buffer_p text_buffer);
 bool text_buffer_end(text_buffer_p text_buffer);
 void text_buffer_set_pos(text_buffer_p text_file, text_pos_p text_pos);
@@ -81,11 +82,6 @@ bool parse_rule(text_buffer_p text_buffer, element_p element)
 	   will be made to skip the element and parse the remainder of the rule */
 	if (element->optional && element->avoid)
 	{
-		/* If a add skip function is defined, apply it. (An add skip function
-		   can be used to process the absence of the element with the result.)
-		   Otherwise, if a add function is defined, it will be called with an
-		   'empty' result, signaling that no element was parsed.
-		   Otherwise, the previous result is used. */
 		if (parse_rule(text_buffer, element->next))
 			return TRUE;
 	}
