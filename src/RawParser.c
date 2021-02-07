@@ -1006,6 +1006,7 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 				DEBUG_EXIT_P1("parse_nt(%s) FAIL", nt);  DEBUG_NL;
 				return FALSE;
 			}
+			cache_item->success = s_fail; // To deal with indirect left-recurssion
 		}
 	}
 	
@@ -1041,9 +1042,6 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 		/* Restore current non-terminal to its previous value */
 		parser->current_nt = surr_nt;
 		
-		/* Update the cache item, if available */
-		if (cache_item != NULL)
-			cache_item->success = s_fail;
 		return FALSE;
 	}
 	
