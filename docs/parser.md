@@ -1,9 +1,16 @@
-# Parser
+# Straightforward parser
 
-(work in progress)
+On this page we give a straightforward implementation of a parser for
+[the grammar](grammar.md). It is a back-tracking parser on a buffer
+containing the text to be parsed. 
 
 ## Text buffer
 
+For this, we first have to define a text buffer, with a current position.
+A position is defined with a zero-based offset from the start of the
+input buffer. For error reporting it is nice to have a 1-based line and
+column number. So, this added to a position, which results in the following
+definition:
 ```c
 struct text_pos
 {
@@ -11,7 +18,14 @@ struct text_pos
 	unsigned int cur_line;    /* Line number (1-based) with the position */
 	unsigned int cur_column;  /* Column number (1-based) with the position */
 };
+```
 
+A text buffer simply consist of a pointer to the input text together with
+its length. For parsing it also keeps the current position, with a character
+pointer into the buffer for the current position. To calculate the column
+position in presence of tab-characters, the tab size needs to be known.
+This results in the following definition for a text buffer: 
+```c
 typedef struct
 {
 	const char *buffer;     /* String containting the input text */
@@ -20,15 +34,25 @@ typedef struct
 	const char *info;       /* Contents starting at the current position */
 	unsigned int tab_size;  /* Tabs are on multiples of the tab_size */
 } text_buffer_t, *text_buffer_p;
+```
 
+Some helper functions for working with a text buffer are defined.
+There is a function to initialize a text buffer with a nul-terminated string,
+a function to move to the next position, a function to check if the current
+position is at the end of the input, and a function to set the current
+position to a position that has been saved before (which is used to
+back-track in case a certain parsing rule failed). The signatures for
+these functions are:
+```c
 void text_buffer_assign_string(text_buffer_p text_buffer, const char* text);
 void text_buffer_next(text_buffer_p text_buffer);
 bool text_buffer_end(text_buffer_p text_buffer);
 void text_buffer_set_pos(text_buffer_p text_file, text_pos_p text_pos);
-
 ```
 
 ## Parse a non-terminal
+
+
 
 ```c
 bool parse_nt(text_buffer_p text_buffer, non_terminal_p non_term)
