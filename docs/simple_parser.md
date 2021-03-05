@@ -12,6 +12,7 @@ input buffer. For error reporting it is nice to have a 1-based line and
 column number. So, this added to a position, which results in the following
 definition:
 ```c
+typedef struct text_pos text_pos_t, *text_pos_p;
 struct text_pos
 {
 	size_t pos;               /* Positive offset from the start of the file */
@@ -26,14 +27,15 @@ pointer into the buffer for the current position. To calculate the column
 position in presence of tab-characters, the tab size needs to be known.
 This results in the following definition for a text buffer: 
 ```c
-typedef struct
+typedef struct text_buffer text_buffer_t, *text_buffer_p;
+struct text_buffer
 {
 	const char *buffer;     /* String containting the input text */
 	size_t buffer_len;      /* Length of the input text */
 	text_pos_t pos;         /* Current position in the input text */
 	const char *info;       /* Contents starting at the current position */
 	unsigned int tab_size;  /* Tabs are on multiples of the tab_size */
-} text_buffer_t, *text_buffer_p;
+};
 ```
 
 Some helper functions for working with a text buffer are defined.
@@ -152,7 +154,7 @@ bool parse_part(text_buffer_p text_buffer, element_p element)
 	switch( element->kind )
 	{
 		case rk_nt:
-			return parse_nt(text_buffer, element->info.non_terminal, &nt_result);
+			return parse_nt(text_buffer, element->info.non_terminal);
 
 		case rk_grouping:
 			/* Try all rules in the grouping */

@@ -48,4 +48,6 @@ style with fragments of code that are extended in steps as described in
 See:
 
 *  [Representation of the grammar](docs/grammar.md)
-*  [Parser](docs/parser.md)
+*  [Simple parser](docs/simple_parser.md)
+*  [Test of simple parser](docs/simple_parser_test.md)
+

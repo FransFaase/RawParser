@@ -16,11 +16,11 @@ recursive non-terminal) is left out of the elements. With this we define a
 non-terminal with the following C code, where `rules_p` is the type for a
 pointer to a collection of production rules:
 ```c
-typedef struct non_terminal *non_terminal_p;
+typedef struct non_terminal non_terminal_t, *non_terminal_p;
 struct non_terminal
 {
 	const char *name;     /* Name of the non-terminal */
-	rules_p first;        /* Normal rules */
+	rules_p normal;       /* Normal rules */
 	rules_p recursive;    /* Left-recursive rules */
 };
 ```
@@ -270,7 +270,7 @@ The defines that needed to define a grammar in this manner, are:
 #define OPT element->optional = TRUE;
 #define AVOID element->avoid = TRUE;
 #define CHAR(C) _NEW_GR(rk_char) element->info.ch = C;
-#define CHARSET(F) _NEW_GR(rk_charset) element->info.char_set = new_char_set(); element->add_char_function = F;
+#define CHARSET _NEW_GR(rk_charset) element->info.char_set = new_char_set();
 #define ADD_CHAR(C) char_set_add_char(element->info.char_set, C);
 #define ADD_RANGE(F,T) char_set_add_range(element->info.char_set, F, T);
 #define GROUPING _NEW_GR(rk_grouping) element->info.rules = new_rule(); rules_p* ref_rule = &element->info.rules; rules_p rules; element_p* ref_element; element_p element;
@@ -278,5 +278,90 @@ The defines that needed to define a grammar in this manner, are:
 These defines, make use of the following functions:
 ```c
 rules_p new_rule();
-element_p new_element(element_kind_t kind);
+element_p new_element(enum element_kind_t kind);
+```
+
+# Implementations
+
+Below we give the implementations details for the missing definition
+## Some basic definition
+
+```c
+//#define NULL 0
+
+typedef int bool;
+#define TRUE 1
+#define FALSE 0
+
+typedef unsigned char byte;
+
+#define MALLOC(T) (T*)malloc(sizeof(T))
+#define MALLOC_N(N,T)  (T*)malloc((N)*sizeof(T))
+#define STR_MALLOC(N) (char*)malloc((N)+1)
+#define STRCPY(D,S) D = (char*)malloc(strlen(S)+1); strcpy(D,S)
+#define FREE(X) free(X)
+
+```
+
+## Character set implementation
+
+```c
+typedef struct char_set *char_set_p;
+struct char_set
+{
+	byte bitvec[32];
+};
+
+char_set_p new_char_set()
+{
+	char_set_p char_set = MALLOC(struct char_set);
+	for (int i = 0; i < 32; i++)
+		char_set->bitvec[i] = 0;
+	return char_set;
+}
+
+bool char_set_contains(char_set_p char_set, const char ch) { return (char_set->bitvec[((byte)ch) >> 3] & (1 << (((byte)ch) & 0x7))) != 0; }
+void char_set_add_char(char_set_p char_set, char ch) { char_set->bitvec[((byte)ch) >> 3] |= 1 << (((byte)ch) & 0x7); }
+void char_set_add_range(char_set_p char_set, char first, char last)
+{
+	byte ch = (byte)first;
+	for (; ((byte)first) <= ch && ch <= ((byte)last); ch++)
+		char_set_add_char(char_set, ch);
+}
+
+```
+
+## Grammar creation implementation
+
+```c
+
+non_terminal_p find_nt(const char *name, non_terminal_dict_p *p_nt)
+{
+   while (*p_nt != NULL && (*p_nt)->elem.name != name && strcmp((*p_nt)->elem.name, name) != 0)
+		p_nt = &((*p_nt)->next);
+
+   if (*p_nt == NULL)
+   {   *p_nt = MALLOC(struct non_terminal_dict);
+	   (*p_nt)->elem.name = name;
+	   (*p_nt)->elem.normal = NULL;
+	   (*p_nt)->elem.recursive = NULL;
+	   (*p_nt)->next = NULL;
+   }
+   return &(*p_nt)->elem;
+}
+
+rules_p new_rule()
+{
+	rules_p rule = MALLOC(struct rules);
+	rule->elements = NULL;
+	rule->next = NULL;
+	return rule;
+}
+
+element_p new_element(enum element_kind_t kind)
+{
+	element_p element = MALLOC(struct element);
+	element_init(element, kind);
+	return element;
+}
 ```
