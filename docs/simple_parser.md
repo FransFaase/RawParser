@@ -23,9 +23,9 @@ struct text_pos
 
 A text buffer simply consist of a pointer to the input text together with
 its length. For parsing it also keeps the current position, with a character
-pointer into the buffer for the current position. To calculate the column
-position in presence of tab-characters, the tab size needs to be known.
-This results in the following definition for a text buffer: 
+pointer into the buffer (in the member `info`) for the current position. To
+calculate the column position in presence of tab-characters, the tab size
+needs to be known. This results in the following definition for a text buffer: 
 ```c
 typedef struct text_buffer text_buffer_t, *text_buffer_p;
 struct text_buffer
@@ -60,29 +60,33 @@ void text_buffer_set_pos(text_buffer_p text_file, text_pos_p text_pos);
 bool parse_nt(text_buffer_p text_buffer, non_terminal_p non_term)
 {
 	/* Try the normal rules in order of declaration */
-	rules_p rule;
-	for (rule = non_term->normal; rule != NULL; rule = rule->next)
+	bool parsed_a_rule = false;
+	for (rules_p rule = non_term->normal; rule != NULL; rule = rule->next)
 	{
 		if (parse_rule(text_buffer, rule->elements))
+		{
+			parsed_a_rule = true;
 			break;
+		}
 	}
 	
-	if (rule == NULL)
-	{
-		/* No rule was succesful */
+	if (!parsed_a_rule)
 		return FALSE;
-	}
 	
 	/* Now that a normal rule was succesfull, repeatingly try left-recursive rules */
 	for(;;)
 	{
-		for (rule = non_term->recursive; rule != NULL; rule = rule->next)
+		parsed_a_rule = false;
+		for (rules_p rule = non_term->recursive; rule != NULL; rule = rule->next)
 		{
 			if (parse_rule(text_buffer, rule->elements))
+			{
+				parsed_a_rule = true;
 				break;
+			}
 		}
 
-		if (rule == NULL)
+		if (!parsed_a_rule)
 			break;
 	}
 

@@ -50,4 +50,4 @@ See:
 *  [Representation of the grammar](docs/grammar.md)
 *  [Simple parser](docs/simple_parser.md)
 *  [Test of simple parser](docs/simple_parser_test.md)
-
+*  [Implementation for text buffer](text_buffer_impl.md)
