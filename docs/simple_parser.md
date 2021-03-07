@@ -1,8 +1,10 @@
-# Straightforward parser
+# Simple parser
 
-On this page we give a straightforward implementation of a parser for
+On this page we give a straightforward implementation of a simple parser for
 [the grammar](grammar.md). It is a back-tracking parser on a buffer
-containing the text to be parsed. 
+containing the text to be parsed. It is not intended as a very efficient
+implementation, but as a reference implementation of how the grammar should
+be interpretted.
 
 ## Text buffer
 
@@ -54,11 +56,17 @@ void text_buffer_set_pos(text_buffer_p text_file, text_pos_p text_pos);
 
 ## Parse a non-terminal
 
-
+Below the function is given for parsing a non-terminal. It makes use of the
+function `parse_rule`, which sees if a productionrule can be parsed at the current
+location in the text buffer. This function is defined in the next section.
 
 ```c
 bool parse_nt(text_buffer_p text_buffer, non_terminal_p non_term)
 {
+```
+* First the function tries to parse one of the normal production rule
+  in the order they are listed in the grammar.
+```c
 	/* Try the normal rules in order of declaration */
 	bool parsed_a_rule = false;
 	for (rules_p rule = non_term->normal; rule != NULL; rule = rule->next)
@@ -72,8 +80,10 @@ bool parse_nt(text_buffer_p text_buffer, non_terminal_p non_term)
 	
 	if (!parsed_a_rule)
 		return FALSE;
-	
-	/* Now that a normal rule was succesfull, repeatingly try left-recursive rules */
+```
+* If one of the normal could be parsed, the function continues to see if some
+  left-recursive production rule can be parsed as long as this is the case
+```c
 	for(;;)
 	{
 		parsed_a_rule = false;
@@ -96,54 +106,82 @@ bool parse_nt(text_buffer_p text_buffer, non_terminal_p non_term)
 
 ## Parse a rule
 
+The function `parse_rule` sees if a [production rule](grammar.md#a-production-rule)
+can be parsed starting at the current location in the text buffer. If the function
+returns `TRUE` the current location could be advanced beyond the part that was
+parsed by the function, otherwise the current location is not affected.
+The function is called recursively for the element of the production rule.
+It makes use of the function `parse_part` to see if the first element of a rule can
+be parsed and the function `parse_seq` which deals with the case the the element
+can occure [more than once](grammar.md#modifiers) according to the grammar.
+
 ```c
 bool parse_rule(text_buffer_p text_buffer, element_p element)
 {
+```
+* if `element` is null, it means that all previous elements of the producion rule
+  has been parsed, which indicates that the whole production rule is parsed.
+```c
 	if (element == NULL)
-	{
-		/* At the end of the rule: */
 		return TRUE;
-	}
 
-	/* Store the current position */
+```
+* The current position of the text buffer is saved, such that it can be
+  restored in case the elements of the production rule cannot be parsed
+  from the current position, and back-tracking is required to try another
+  alternative.
+```c
 	text_pos_t sp = text_buffer->pos;
 	
-	/* If the first element is optional and should be avoided, first an attempt
-	   will be made to skip the element and parse the remainder of the rule */
+```
+* If the first element is optional and should be avoided, first an attempt
+  will be made to skip the element and parse the remainder of the rule.
+  If this is not succesful, an attempt to parse the element is made.
+```c
 	if (element->optional && element->avoid)
 	{
 		if (parse_rule(text_buffer, element->next))
 			return TRUE;
 	}
 		
-	if (element->sequence)
+```
+* Call the `parse_part` function to see if the first element of the production
+  rule can be parsed from the current position in the production rule.
+  If this is succesful and the element can occur more than once, the
+  function `parse_seq` is called, otherwise the function is called
+  recursively for the remainder of the elements of the production rule.
+```c
+	if (parse_part(text_buffer, element))
 	{
-		if (parse_part(text_buffer, element))
+		if (element->sequence)
 		{
-			/* Now parse the remainder elements of the sequence (and thereafter the remainder of the rule. */
 			if (parse_seq(text_buffer, element))
 				return TRUE;
 		}
-	}
-	else
-	{
-		/* The first element is not a sequence: Try to parse the first element */
-		if (parse_part(text_buffer, element))
+		else
 		{
 			if (parse_rule(text_buffer, element->next))
 				return TRUE;
 		}
 	}
 	
-	/* The element was optional (and should not be avoided): Skip the element
-	   and try to parse the remainder of the rule */
+```
+* At this point in the function, the first element could not be parsed
+  from the current position in the text buffer or it could, but the
+  remainder of the elements could not be parsed.
+  If the element was optional (and should not be avoided), see if the
+  remainder of the element could be parsed from the current position
+  in the text buffer.
+```c
 	if (element->optional && !element->avoid)
 	{
 		if (parse_rule(text_buffer, element->next))
 			return TRUE;
 	}
 
-	/* Failed to parse the rule: reset the current position to the saved position. */
+```
+* Failed to parse the rule: reset the current position to the saved position.
+```c
 	text_buffer_set_pos(text_buffer, &sp);
 	
 	return FALSE;
