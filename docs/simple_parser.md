@@ -56,9 +56,11 @@ void text_buffer_set_pos(text_buffer_p text_file, text_pos_p text_pos);
 
 ## Parse a non-terminal
 
-Below the function is given for parsing a non-terminal. It makes use of the
-function `parse_rule`, which sees if a productionrule can be parsed at the current
-location in the text buffer. This function is defined in the next section.
+Below the function is given for parsing a non-terminal. If the function
+returns `TRUE` the current location could be advanced beyond the part that was
+parsed by the function, otherwise the current location is not affected.
+It makes use of the function `parse_rule`, which sees if a productionrule can
+be parsed at the current location in the text buffer and is defined in the next section.
 
 ```c
 bool parse_nt(text_buffer_p text_buffer, non_terminal_p non_term)
@@ -111,7 +113,7 @@ can be parsed starting at the current location in the text buffer. If the functi
 returns `TRUE` the current location could be advanced beyond the part that was
 parsed by the function, otherwise the current location is not affected.
 The function is called recursively for the element of the production rule.
-It makes use of the function `parse_part` to see if the first element of a rule can
+It makes use of the function `parse_element` to see if the first element of a rule can
 be parsed and the function `parse_seq` which deals with the case the the element
 can occure [more than once](grammar.md#modifiers) according to the grammar.
 
@@ -145,13 +147,13 @@ bool parse_rule(text_buffer_p text_buffer, element_p element)
 	}
 		
 ```
-* Call the `parse_part` function to see if the first element of the production
+* Call the `parse_element` function to see if the first element of the production
   rule can be parsed from the current position in the production rule.
   If this is succesful and the element can occur more than once, the
   function `parse_seq` is called, otherwise the function is called
   recursively for the remainder of the elements of the production rule.
 ```c
-	if (parse_part(text_buffer, element))
+	if (parse_element(text_buffer, element))
 	{
 		if (element->sequence)
 		{
@@ -188,46 +190,69 @@ bool parse_rule(text_buffer_p text_buffer, element_p element)
 }
 ```
 
-## Parse a part of a rule
+## Parse an element of a rule
+
+The function `parse_element` sees if a single instance of the elmeent of a production
+rule can be parsed starting at the current location in the text buffer. If the function
+returns `TRUE` the current location could be advanced beyond the part that was
+parsed by the function, otherwise the current location is not affected.
 
 ```c
-bool parse_part(text_buffer_p text_buffer, element_p element)
+bool parse_element(text_buffer_p text_buffer, element_p element)
 {
-	switch( element->kind )
+	switch (element->kind)
 	{
+```
+* In case the element specifies that the end of the input should be reached,
+  return if this is the case
+```c
+		case rk_end:
+			return text_buffer_end(text_buffer);
+
+```
+* In case the element specifies that a certain character is to be expected,
+  check if this character occurs at the current location in the text buffer.
+  If this the case, advance the current location and return `TRUE`.
+```c
+		case rk_char:
+			if (*text_buffer->info == element->info.ch)
+			{
+				text_buffer_next(text_buffer);
+				return TRUE;
+			}
+			break;
+
+```
+* In case the element specifies that a certain character range is to be expected,
+  check if this character at the current location in the text buffer is contained
+  in the character set. If this the case, advance the current location and return `TRUE`.
+```c
+		case rk_charset:
+			if (char_set_contains(element->info.char_set, *text_buffer->info))
+			{
+				text_buffer_next(text_buffer);
+				return TRUE;
+			}
+			break;
+		
+```
+* In case the element specifies that a certain non-terminal is to be expected,
+  return the result of calling the `parse_nt` function.
+```c
 		case rk_nt:
 			return parse_nt(text_buffer, element->info.non_terminal);
 
+```
+* In case the element specifies [a grouping](grammar.md#grouping), see if one of
+  the production rules in this grouping can be parsed from the current location
+  in the text buffer, by calling the function `parse_rule`. If one succeeds,
+  return `TRUE`.
+```c
 		case rk_grouping:
-			/* Try all rules in the grouping */
 			for (rules_p rule = element->info.rules; rule != NULL; rule = rule->next )
 			{
 				if (parse_rule(text_buffer, rule->elements))
 					return TRUE;
-			}
-			break;
-
-		case rk_end:
-			/* Check if the end of the buffer is reached */
-			return text_buffer_end(text_buffer);
-
-		case rk_char:
-			/* Check if the specified character is found at the current position in the text buffer */
-			if (*text_buffer->info == element->info.ch)
-			{
-				/* Advance the current position of the text buffer */
-				text_buffer_next(text_buffer);
-				return TRUE;
-			}
-			break;
-
-		case rk_charset:
-			/* Check if the character at the current position in the text buffer is found in the character set */
-			if (char_set_contains(element->info.char_set, *text_buffer->info))
-			{
-				/* Advance the current position of the text buffer */
-				text_buffer_next(text_buffer);
-				return TRUE;
 			}
 			break;
 	}
@@ -257,7 +282,7 @@ bool parse_seq(text_buffer_p text_buffer, element_p element)
 		return FALSE;
 		
 	/* Try to parse the next element of the sequence */
-	if (parse_part(text_buffer, element))
+	if (parse_element(text_buffer, element))
 	{
 		/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
 		if (parse_seq(text_buffer, element))
