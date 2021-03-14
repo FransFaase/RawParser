@@ -40,7 +40,7 @@ It seems by attempting this, it has improved the quality of the
 code as well. As with every attempt to write software, there are
 still many ad hoc decisions that are debatable.
 
-## documentation
+## Documentation
 
 I have also started to document the code in a [literary programming](https://en.wikipedia.org/wiki/Literate_programming)
 style with fragments of code that are extended in steps as described in
@@ -50,4 +50,21 @@ See:
 *  [Representation of the grammar](docs/grammar.md)
 *  [Simple parser](docs/simple_parser.md)
 *  [Test of simple parser](docs/simple_parser_test.md)
-*  [Implementation for text buffer](text_buffer_impl.md)
+*  [Implementation for text buffer](docs/text_buffer_impl.md)
+
+## Processing the documentation
+
+The documentation can be processed with
+[MarkDownC](https://github.com/FransFaase/IParse/blob/master/README.md#markdownc)
+into C programs. (Following link for instructions on building MarkDownC).
+In the commands below, prefix the call to `MarkDownC` with the path
+where it can be found (if needed). Replace `gcc` with your prefered
+C-compiler.
+
+To test parsing with the simple parser, issue the following commands
+in the `docs` folder
+```
+MarkDownC grammar.md simple_parser.md simple_parser_test.md text_buffer_impl.md >testsp.c
+gcc testsp.c -o testsp
+./testsp
+```

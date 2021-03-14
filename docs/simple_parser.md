@@ -70,12 +70,12 @@ bool parse_nt(text_buffer_p text_buffer, non_terminal_p non_term)
   in the order they are listed in the grammar.
 ```c
 	/* Try the normal rules in order of declaration */
-	bool parsed_a_rule = false;
+	bool parsed_a_rule = FALSE;
 	for (rules_p rule = non_term->normal; rule != NULL; rule = rule->next)
 	{
 		if (parse_rule(text_buffer, rule->elements))
 		{
-			parsed_a_rule = true;
+			parsed_a_rule = TRUE;
 			break;
 		}
 	}
@@ -88,12 +88,12 @@ bool parse_nt(text_buffer_p text_buffer, non_terminal_p non_term)
 ```c
 	for(;;)
 	{
-		parsed_a_rule = false;
+		parsed_a_rule = FALSE;
 		for (rules_p rule = non_term->recursive; rule != NULL; rule = rule->next)
 		{
 			if (parse_rule(text_buffer, rule->elements))
 			{
-				parsed_a_rule = true;
+				parsed_a_rule = TRUE;
 				break;
 			}
 		}
