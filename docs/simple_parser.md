@@ -128,14 +128,6 @@ bool parse_rule(text_buffer_p text_buffer, element_p element)
 		return TRUE;
 
 ```
-* The current position of the text buffer is saved, such that it can be
-  restored in case the elements of the production rule cannot be parsed
-  from the current position, and back-tracking is required to try another
-  alternative.
-```c
-	text_pos_t sp = text_buffer->pos;
-	
-```
 * If the first element is optional and should be avoided, first an attempt
   will be made to skip the element and parse the remainder of the rule.
   If this is not succesful, an attempt to parse the element is made.
@@ -146,6 +138,14 @@ bool parse_rule(text_buffer_p text_buffer, element_p element)
 			return TRUE;
 	}
 		
+```
+* The current position of the text buffer is saved, such that it can be
+  restored in case the elements of the production rule cannot be parsed
+  from the current position, and back-tracking is required to try another
+  alternative.
+```c
+	text_pos_t sp = text_buffer->pos;
+	
 ```
 * Call the `parse_element` function to see if the first element of the production
   rule can be parsed from the current position in the production rule.
@@ -168,10 +168,15 @@ bool parse_rule(text_buffer_p text_buffer, element_p element)
 	}
 	
 ```
-* At this point in the function, the first element could not be parsed
-  from the current position in the text buffer or it could, but the
-  remainder of the elements could not be parsed.
-  If the element was optional (and should not be avoided), see if the
+* At this point in the function, an instance of the first element could
+  not be parsed from the current position in the text buffer or it could,
+  but the remainder of the elements could not be parsed. reset the current
+  position to the saved position.
+```c
+	text_buffer_set_pos(text_buffer, &sp);
+	
+```
+* If the element was optional (and should not be avoided), see if the
   remainder of the element could be parsed from the current position
   in the text buffer.
 ```c
@@ -182,9 +187,84 @@ bool parse_rule(text_buffer_p text_buffer, element_p element)
 	}
 
 ```
-* Failed to parse the rule: reset the current position to the saved position.
+* Failed to parse the rule.
+```c
+	return FALSE;
+}
+```
+
+## Parse a sequence
+
+The function `parse_seq` sees if a production rule can be parsed starting at
+the current location in the text buffer when the first element can occur as
+a sequence and an instance of that element has been parsed succesfully. If the function
+returns `TRUE` the current location could be advanced beyond the part that was
+parsed by the function, otherwise the current location is not affected.
+The function calls itself recursively to parse more instances of the first
+the element to form a sequence and calls the function `parse_rule` to try to
+parse the remainding elments of the production rule. It makes use of the function
+`parse_element` to see if the first element of a rule can be parsed repeatedly.
+```c
+bool parse_seq(text_buffer_p text_buffer, element_p element)
+{
+```
+* If the first element should be avoided, first an attempt will be made to parse
+  the remainder of the rule. If this is not succesful, an attempt to parse the element
+  is made.
+```c
+	if (element->avoid)
+	{
+		if (parse_rule(text_buffer, element->next))
+			return TRUE;
+	}
+	
+```
+* The current position of the text buffer is saved, such that it can be
+  restored in case the elements of the production rule cannot be parsed
+  from the current position, and back-tracking is required to try another
+  alternative.
+```c
+	text_pos_t sp = text_buffer->pos;
+	
+```
+* Another instance of the sequence can only be parsed if there was not
+  chain rule or otherwise the chain rule could be parsed at the current
+  location in the text buffer.
+```c
+	if (element->chain_rule == NULL || parse_rule(text_buffer, element->chain_rule))
+	{
+		
+		/* Try to parse the next element of the sequence */
+		if (parse_element(text_buffer, element))
+		{
+			/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
+			if (parse_seq(text_buffer, element))
+				return TRUE;
+		}
+	}
+	
+```
+* At this point in the function, a repeated instance of the first element
+  could not be parsed from the current position in the text buffer or it
+  could, but the remainder of the elements could not be parsed.
+  reset the current position to the saved location.
 ```c
 	text_buffer_set_pos(text_buffer, &sp);
+
+```
+  If we have not tried to parse the remainder of the elments of the
+  production rule yet (because it should be avoided), see if the
+  remainder of the element could be parsed from the current position
+  in the text buffer.
+```c
+	if (!element->avoid)
+	{
+		if (parse_rule(text_buffer, element->next))
+			return TRUE;
+	}
+```
+* Failed to parse the rule.
+```c
 	
 	return FALSE;
 }
@@ -261,46 +341,3 @@ bool parse_element(text_buffer_p text_buffer, element_p element)
 }
 ```
 
-## Parse a sequence
-
-```c
-bool parse_seq(text_buffer_p text_buffer, element_p element)
-{
-	/* In case of the avoid modifier, first an attempt is made to parse the
-	   remained of the rule */
-	if (element->avoid)
-	{
-		if (parse_rule(text_buffer, element->next))
-			return TRUE;
-	}
-	
-	/* Store the current position */
-	text_pos_t sp = text_buffer->pos;
-
-	/* If a chain rule is defined, try to parse it.*/
-	if (element->chain_rule != NULL && !parse_rule(text_buffer, element->chain_rule))
-		return FALSE;
-		
-	/* Try to parse the next element of the sequence */
-	if (parse_element(text_buffer, element))
-	{
-		/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
-		if (parse_seq(text_buffer, element))
-			return TRUE;
-	}
-	
-	/* Failed to parse the next element of the sequence: reset the current position to the saved position. */
-	text_buffer_set_pos(text_buffer, &sp);
-	
-	/* In case of the avoid modifier, an attempt to parse the remained of the
-	   rule, was already made. So, only in case of no avoid modifier, attempt
-	   to parse the remainder of the rule */
-	if (!element->avoid)
-	{
-		if (parse_rule(text_buffer, element->next))
-			return TRUE;
-	}
-	
-	return FALSE;
-}
-```
