@@ -4,7 +4,8 @@ On this page we give a straightforward implementation of a simple parser for
 [the grammar](grammar.md). It is a back-tracking parser on a buffer
 containing the text to be parsed. It is not intended as a very efficient
 implementation, but as a reference implementation of how the grammar should
-be interpretted.
+be interpreted. One approach to make it more efficient it to implement
+[caching](caching_parser.md).
 
 ## Text buffer
 
@@ -69,7 +70,6 @@ bool parse_nt(text_buffer_p text_buffer, non_terminal_p non_term)
 * First the function tries to parse one of the normal production rule
   in the order they are listed in the grammar.
 ```c
-	/* Try the normal rules in order of declaration */
 	bool parsed_a_rule = FALSE;
 	for (rules_p rule = non_term->normal; rule != NULL; rule = rule->next)
 	{
@@ -84,9 +84,9 @@ bool parse_nt(text_buffer_p text_buffer, non_terminal_p non_term)
 		return FALSE;
 ```
 * If one of the normal could be parsed, the function continues to see if some
-  left-recursive production rule can be parsed as long as this is the case
+  left-recursive production rule can be parsed as long as this is the case.
 ```c
-	for(;;)
+	while (parsed_a_rule)
 	{
 		parsed_a_rule = FALSE;
 		for (rules_p rule = non_term->recursive; rule != NULL; rule = rule->next)
@@ -97,9 +97,6 @@ bool parse_nt(text_buffer_p text_buffer, non_terminal_p non_term)
 				break;
 			}
 		}
-
-		if (!parsed_a_rule)
-			break;
 	}
 
 	return TRUE;

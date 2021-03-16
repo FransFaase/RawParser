@@ -469,6 +469,12 @@ void element_print(FILE *f, element_p element)
 				fprintf(f, "-\\377");
 			fprintf(f, "] ");
 			break;
+		case rk_end:
+			fprintf(f, "<eof> ");
+			break;
+		case rk_term:
+			fprintf(f, "<term> ");
+			break;
 	}
 
 	if (element->sequence)
@@ -1021,15 +1027,18 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 	}
 
 	/* Try the normal rules in order of declaration */
-	rules_p rule;
-	for (rule = non_term->normal; rule != NULL; rule = rule->next )
+	bool parsed_a_rule = FALSE;
+	for (rules_p rule = non_term->normal; rule != NULL; rule = rule->next )
 	{
 		DECL_RESULT(start)
 		if (parse_rule(parser, rule->elements, &start, rule, result))
+		{
+			parsed_a_rule = TRUE;
 			break;
+		}
 	}
 	
-	if (rule == NULL)
+	if (!parsed_a_rule)
 	{
 		/* No rule was succesful */
 		DEBUG_EXIT_P1("parse_nt(%s) - failed", nt);  DEBUG_NL;
@@ -1046,9 +1055,10 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 	}
 	
 	/* Now that a normal rule was succesfull, repeatingly try left-recursive rules */
-	for(;;)
+	while (parsed_a_rule)
 	{
-		for (rule = non_term->recursive; rule != NULL; rule = rule->next)
+		parsed_a_rule = FALSE;
+		for (rules_p rule = non_term->recursive; rule != NULL; rule = rule->next)
 		{
 			DECL_RESULT(start_result)
 			if (rule->rec_start_function != NULL)
@@ -1061,7 +1071,8 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 			}
 			DECL_RESULT(rule_result)
 			if (parse_rule(parser, rule->elements, &start_result, rule, &rule_result))
-			{   
+			{
+				parsed_a_rule = TRUE;
 				result_assign(result, &rule_result);
 				DISP_RESULT(rule_result)
 				DISP_RESULT(start_result)
@@ -1070,9 +1081,6 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 			DISP_RESULT(rule_result)
 			DISP_RESULT(start_result)
 		}
-
-		if (rule == NULL)
-			break;
 	}
 
 	DEBUG_EXIT_P1("parse_nt(%s) = ", nt);
@@ -1108,7 +1116,7 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 	
 */
 
-bool parse_part(parser_p parser, element_p element, const result_p prev_result, result_p result);
+bool parse_element(parser_p parser, element_p element, const result_p prev_result, result_p result);
 bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, rules_p rule, result_p result);
 
 bool parse_rule(parser_p parser, element_p element, const result_p prev_result, rules_p rule, result_p rule_result)
@@ -1131,9 +1139,6 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 		return TRUE;
 	}
 
-	/* Store the current position */
-	text_pos_t sp = parser->text_buffer->pos;
-	
 	/* If the first element is optional and should be avoided, first an attempt
 	   will be made to skip the element and parse the remainder of the rule */
 	if (element->optional && element->avoid)
@@ -1178,6 +1183,9 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 		DISP_RESULT(skip_result);
 	}
 		
+	/* Store the current position */
+	text_pos_t sp = parser->text_buffer->pos;
+	
 	DECL_RESULT(part_result);
 	if (element->sequence)
 	{
@@ -1188,7 +1196,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 		
 		/* Try to parse the first element of the sequence. */
 		DECL_RESULT(seq_elem);
-		if (parse_part(parser, element, &seq_begin, &seq_elem))
+		if (parse_element(parser, element, &seq_begin, &seq_elem))
 		{
 			/* Now parse the remainder elements of the sequence (and thereafter the remainder of the rule. */
 			if (parse_seq(parser, element, &seq_elem, prev_result, rule, rule_result))
@@ -1207,7 +1215,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 	{
 		/* The first element is not a sequence: Try to parse the first element */
 		DECL_RESULT(elem);
-		if (parse_part(parser, element, prev_result, &elem))
+		if (parse_element(parser, element, prev_result, &elem))
 		{
 			if (parse_rule(parser, element->next, &elem, rule, rule_result))
 			{
@@ -1220,7 +1228,10 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 		DISP_RESULT(elem);
 	}
 	
-	/* The element was optional (and should not be avoided): Skip the element
+	/* Failed to parse the rule: reset the current position to the saved position. */
+	text_buffer_set_pos(parser->text_buffer, &sp);
+	
+	/* If the element was optional (and should not be avoided): Skip the element
 	   and try to parse the remainder of the rule */
 	if (element->optional && !element->avoid)
 	{
@@ -1259,22 +1270,108 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 		DISP_RESULT(skip_result);
 	}
 
-	/* Failed to parse the rule: reset the current position to the saved position. */
-	text_buffer_set_pos(parser->text_buffer, &sp);
-	
     DEBUG_EXIT("parse_rule: failed"); DEBUG_NL;
 	return FALSE;
 }
 
+bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, rules_p rule, result_p rule_result)
+{
+	/* In case of the avoid modifier, first an attempt is made to parse the
+	   remained of the rule */
+	if (element->avoid)
+	{
+		DECL_RESULT(result);
+		if (element->add_seq_function != NULL && !element->add_seq_function(prev, prev_seq, &result))
+		{
+			DISP_RESULT(result);
+			return FALSE;
+		}
+		if (parse_rule(parser, element->next, &result, rule, rule_result))
+		{
+			DISP_RESULT(result);
+			return TRUE;
+		}
+		DISP_RESULT(result);
+	}
+	
+	/* Store the current position */
+	text_pos_t sp = parser->text_buffer->pos;
+
+	/* If a chain rule is defined, try to parse it.*/
+	if (element->chain_rule != NULL)
+	{
+		DECL_RESULT(dummy_chain_elem);
+		if (parse_rule(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem))
+		{
+			/* If the chain rule was succesful, an element should follow. */
+			DISP_RESULT(dummy_chain_elem);
+			DECL_RESULT(seq_elem);
+			if (parse_element(parser, element, prev_seq, &seq_elem))
+			{
+				/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
+				if (parse_seq(parser, element, &seq_elem, prev, rule, rule_result))
+				{
+					DISP_RESULT(seq_elem);
+					return TRUE;
+				}
+			}
+			DISP_RESULT(seq_elem);
+			return FALSE;
+		}
+		DISP_RESULT(dummy_chain_elem);
+	}
+	else
+	{
+		/* Try to parse the next element of the sequence */
+		DECL_RESULT(seq_elem);
+		if (parse_element(parser, element, prev_seq, &seq_elem))
+		{
+			/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
+			if (parse_seq(parser, element, &seq_elem, prev, rule, rule_result))
+			{
+				DISP_RESULT(seq_elem);
+				return TRUE;
+			}
+		}
+		DISP_RESULT(seq_elem);
+	}
+	
+	/* Failed to parse the next element of the sequence: reset the current position to the saved position. */
+	text_buffer_set_pos(parser->text_buffer, &sp);
+
+	/* In case of the avoid modifier, an attempt to parse the remained of the
+	   rule, was already made. So, only in case of no avoid modifier, attempt
+	   to parse the remainder of the rule */
+	if (!element->avoid)
+	{
+		DECL_RESULT(result);
+		if (element->add_seq_function != NULL && !element->add_seq_function(prev, prev_seq, &result))
+		{
+			DISP_RESULT(result);
+			return FALSE;
+		}
+		
+		if (parse_rule(parser, element->next, &result, rule, rule_result))
+		{
+			DISP_RESULT(result);
+			return TRUE;
+		}
+		DISP_RESULT(result);
+	}
+	
+	return FALSE;
+}
+
+
 /*
-	Parse part of an element
-	~~~~~~~~~~~~~~~~~~~~~~~~
+	Parse an element
+	~~~~~~~~~~~~~~~~
 	
 	The following function is used to parse a part of an element, not dealing
 	with if the element is optional or a sequence.
 */
 
-bool parse_part(parser_p parser, element_p element, const result_p prev_result, result_p result)
+bool parse_element(parser_p parser, element_p element, const result_p prev_result, result_p result)
 {
 	/* Store the current position */
 	text_pos_t sp = parser->text_buffer->pos;
@@ -1400,95 +1497,6 @@ bool parse_part(parser_p parser, element_p element, const result_p prev_result, 
 		element->set_pos(result, &sp);
 
 	return TRUE;
-}
-
-
-bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, rules_p rule, result_p rule_result)
-{
-	/* In case of the avoid modifier, first an attempt is made to parse the
-	   remained of the rule */
-	if (element->avoid)
-	{
-		DECL_RESULT(result);
-		if (element->add_seq_function != NULL && !element->add_seq_function(prev, prev_seq, &result))
-		{
-			DISP_RESULT(result);
-			return FALSE;
-		}
-		if (parse_rule(parser, element->next, &result, rule, rule_result))
-		{
-			DISP_RESULT(result);
-			return TRUE;
-		}
-		DISP_RESULT(result);
-	}
-	
-	/* Store the current position */
-	text_pos_t sp = parser->text_buffer->pos;
-
-	/* If a chain rule is defined, try to parse it.*/
-	if (element->chain_rule != NULL)
-	{
-		DECL_RESULT(dummy_chain_elem);
-		if (parse_rule(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem))
-		{
-			/* If the chain rule was succesful, an element should follow. */
-			DISP_RESULT(dummy_chain_elem);
-			DECL_RESULT(seq_elem);
-			if (parse_part(parser, element, prev_seq, &seq_elem))
-			{
-				/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
-				if (parse_seq(parser, element, &seq_elem, prev, rule, rule_result))
-				{
-					DISP_RESULT(seq_elem);
-					return TRUE;
-				}
-			}
-			DISP_RESULT(seq_elem);
-			return FALSE;
-		}
-		DISP_RESULT(dummy_chain_elem);
-	}
-	else
-	{
-		/* Try to parse the next element of the sequence */
-		DECL_RESULT(seq_elem);
-		if (parse_part(parser, element, prev_seq, &seq_elem))
-		{
-			/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
-			if (parse_seq(parser, element, &seq_elem, prev, rule, rule_result))
-			{
-				DISP_RESULT(seq_elem);
-				return TRUE;
-			}
-		}
-		DISP_RESULT(seq_elem);
-	}
-	
-	/* Failed to parse the next element of the sequence: reset the current position to the saved position. */
-	text_buffer_set_pos(parser->text_buffer, &sp);
-
-	/* In case of the avoid modifier, an attempt to parse the remained of the
-	   rule, was already made. So, only in case of no avoid modifier, attempt
-	   to parse the remainder of the rule */
-	if (!element->avoid)
-	{
-		DECL_RESULT(result);
-		if (element->add_seq_function != NULL && !element->add_seq_function(prev, prev_seq, &result))
-		{
-			DISP_RESULT(result);
-			return FALSE;
-		}
-		
-		if (parse_rule(parser, element->next, &result, rule, rule_result))
-		{
-			DISP_RESULT(result);
-			return TRUE;
-		}
-		DISP_RESULT(result);
-	}
-	
-	return FALSE;
 }
 
 
@@ -1809,6 +1817,7 @@ bool make_tree(const result_p rule_result, void* data, result_p result)
 	const char *name = (const char*)data;
 	tree_p tree = make_tree_with_children(name, children);
 	result_assign_ref_counted(result, tree, tree_print);
+	return TRUE;
 }
 
 bool pass_tree(const result_p rule_result, void* data, result_p result)
@@ -1951,6 +1960,7 @@ bool ident_add_char(result_p prev, char ch, result_p result)
 		if (ident_data->len < 64)
 			ident_data->ident[ident_data->len++] = ch;
 	}
+	return TRUE;
 }
 
 void ident_set_pos(result_p result, text_pos_p ps)

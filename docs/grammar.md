@@ -258,7 +258,7 @@ void white_space_grammar(non_terminal_dict_p *all_nt)
 
 The defines that needed to define a grammar in this manner, are:
 ```c
-#define HEADER(N) non_terminal_dict_p *_nt = N; non_terminal_p nt; rules_p* ref_rule; rules_p* ref_rec_rule; rules_p rules; element_p* ref_element; element_p element;
+#define HEADER(N) non_terminal_dict_p *_nt = N; non_terminal_p nt = NULL; rules_p* ref_rule = NULL; rules_p* ref_rec_rule = NULL; rules_p rules; element_p* ref_element = NULL; element_p element = NULL;
 #define NT_DEF(N) nt = find_nt(N, _nt); ref_rule = &nt->normal; ref_rec_rule = &nt->recursive;
 #define RULE rules = *ref_rule = new_rule(); ref_rule = &rules->next; ref_element = &rules->elements;
 #define REC_RULE rules = *ref_rec_rule = new_rule(); ref_rec_rule = &rules->next; ref_element = &rules->elements;
@@ -273,7 +273,7 @@ The defines that needed to define a grammar in this manner, are:
 #define CHARSET _NEW_GR(rk_charset) element->info.char_set = new_char_set();
 #define ADD_CHAR(C) char_set_add_char(element->info.char_set, C);
 #define ADD_RANGE(F,T) char_set_add_range(element->info.char_set, F, T);
-#define GROUPING _NEW_GR(rk_grouping) element->info.rules = new_rule(); rules_p* ref_rule = &element->info.rules; rules_p rules; element_p* ref_element; element_p element;
+#define GROUPING _NEW_GR(rk_grouping) element->info.rules = new_rule(); rules_p* ref_rule = &element->info.rules; rules_p rules = NULL; element_p* ref_element = NULL; element_p element = NULL;
 ```
 These defines, make use of the following functions:
 ```c
