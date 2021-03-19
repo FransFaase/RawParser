@@ -50,6 +50,8 @@ See:
 *  [Representation of the grammar](docs/grammar.md)
 *  [Simple parser](docs/simple_parser.md)
 *  [Test of simple parser](docs/simple_parser_test.md)
+*  [Caching parser](docs/caching_parser.md)
+*  [Test of caching parser](docs/caching_parser_test.md)
 *  [Implementation for text buffer](docs/text_buffer_impl.md)
 
 ## Processing the documentation
@@ -61,10 +63,5 @@ In the commands below, prefix the call to `MarkDownC` with the path
 where it can be found (if needed). Replace `gcc` with your prefered
 C-compiler.
 
-To test parsing with the simple parser, issue the following commands
-in the `docs` folder
-```
-MarkDownC grammar.md simple_parser.md simple_parser_test.md text_buffer_impl.md >testsp.c
-gcc testsp.c -o testsp
-./testsp
-```
+The test documentation pages contain instructions for the command
+line arguments for the calls to MarkDownC
