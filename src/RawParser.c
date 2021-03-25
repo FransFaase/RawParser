@@ -880,7 +880,7 @@ void text_buffer_next(text_buffer_p text_buffer)
 	{
 	  switch(*text_buffer->info)
 	  {   case '\t':
-			  text_buffer->pos.cur_column = ((text_buffer->pos.cur_column + text_buffer->tab_size) % text_buffer->tab_size) * text_buffer->tab_size;
+			  text_buffer->pos.cur_column += text_buffer->tab_size - (text_buffer->pos.cur_column - 1) % text_buffer->tab_size;
 			  break;
 		  case '\n':
 			  text_buffer->pos.cur_line++;

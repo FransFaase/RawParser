@@ -323,6 +323,9 @@ and everything in between.
 
 ## A memoization cache
 
+Below an implementation of a memoization cache, which simple stores
+the result of all calls to `parse_nt`.
+
 ```c
 typedef struct solution *solution_p;
 struct solution
