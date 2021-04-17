@@ -41,7 +41,7 @@ int main(int argc, char *argv[])
 ## Testing with MarkDownC
 
 With the following call to [MarkDownC](https://github.com/FransFaase/IParse/blob/master/README.md#markdownc)
-a C-program can be generated to execute the test:
+in the `docs` folder, a C-program can be generated to execute the test:
 ```
 MarkDownC grammar.md simple_parser.md simple_parser_test.md text_buffer_impl.md >testsp.c
 ```
