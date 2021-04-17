@@ -34,7 +34,7 @@ void test_parse_white_space(non_terminal_dict_p all_nt, const char *input)
 ## Testing with MarkDownC
 
 With the following call to [MarkDownC](https://github.com/FransFaase/IParse/blob/master/README.md#markdownc)
-a C-program can be generated to execute the test:
+in the `docs` folder, a C-program can be generated to execute the test:
 ```
 MarkDownC grammar.md simple_parser.md cached_parser.md simple_parser_test.md cached_parser_test.md text_buffer_impl.md >testsp.c
 ```
