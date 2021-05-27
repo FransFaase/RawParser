@@ -52,6 +52,8 @@ See:
 *  [Test of simple parser](docs/simple_parser_test.md)
 *  [Caching parser](docs/caching_parser.md)
 *  [Test of caching parser](docs/caching_parser_test.md)
+*  [Greedy modifier](docs/greedy_modifier.md)
+*  [Results](docs/result.md)
 *  [Implementation for text buffer](docs/text_buffer_impl.md)
 
 ## Processing the documentation

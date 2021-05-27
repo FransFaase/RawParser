@@ -18,9 +18,9 @@ definition:
 typedef struct text_pos text_pos_t, *text_pos_p;
 struct text_pos
 {
-	size_t pos;               /* Positive offset from the start of the file */
-	unsigned int cur_line;    /* Line number (1-based) with the position */
-	unsigned int cur_column;  /* Column number (1-based) with the position */
+    size_t pos;               /* Positive offset from the start of the file */
+    unsigned int cur_line;    /* Line number (1-based) with the position */
+    unsigned int cur_column;  /* Column number (1-based) with the position */
 };
 ```
 
@@ -33,11 +33,11 @@ needs to be known. This results in the following definition for a text buffer:
 typedef struct text_buffer text_buffer_t, *text_buffer_p;
 struct text_buffer
 {
-	const char *buffer;     /* String containting the input text */
-	size_t buffer_len;      /* Length of the input text */
-	text_pos_t pos;         /* Current position in the input text */
-	const char *info;       /* Contents starting at the current position */
-	unsigned int tab_size;  /* Tabs are on multiples of the tab_size */
+    const char *buffer;     /* String containting the input text */
+    size_t buffer_len;      /* Length of the input text */
+    text_pos_t pos;         /* Current position in the input text */
+    const char *info;       /* Contents starting at the current position */
+    unsigned int tab_size;  /* Tabs are on multiples of the tab_size */
 };
 ```
 
@@ -70,36 +70,36 @@ bool parse_nt(text_buffer_p text_buffer, non_terminal_p non_term)
 * First the function tries to parse one of the normal production rule
   in the order they are listed in the grammar.
 ```c
-	bool parsed_a_rule = FALSE;
-	for (rules_p rule = non_term->normal; rule != NULL; rule = rule->next)
-	{
-		if (parse_rule(text_buffer, rule->elements))
-		{
-			parsed_a_rule = TRUE;
-			break;
-		}
-	}
-	
-	if (!parsed_a_rule)
-		return FALSE;
+    bool parsed_a_rule = FALSE;
+    for (rules_p rule = non_term->normal; rule != NULL; rule = rule->next)
+    {
+        if (parse_rule(text_buffer, rule->elements))
+        {
+            parsed_a_rule = TRUE;
+            break;
+        }
+    }
+
+    if (!parsed_a_rule)
+        return FALSE;
 ```
 * If one of the normal could be parsed, the function continues to see if some
   left-recursive production rule can be parsed as long as this is the case.
 ```c
-	while (parsed_a_rule)
-	{
-		parsed_a_rule = FALSE;
-		for (rules_p rule = non_term->recursive; rule != NULL; rule = rule->next)
-		{
-			if (parse_rule(text_buffer, rule->elements))
-			{
-				parsed_a_rule = TRUE;
-				break;
-			}
-		}
-	}
+    while (parsed_a_rule)
+    {
+        parsed_a_rule = FALSE;
+        for (rules_p rule = non_term->recursive; rule != NULL; rule = rule->next)
+        {
+            if (parse_rule(text_buffer, rule->elements))
+            {
+                parsed_a_rule = TRUE;
+                break;
+            }
+        }
+    }
 
-	return TRUE;
+    return TRUE;
 }
 ```
 
@@ -121,28 +121,28 @@ bool parse_rule(text_buffer_p text_buffer, element_p element)
 * if `element` is null, it means that all previous elements of the producion rule
   has been parsed, which indicates that the whole production rule is parsed.
 ```c
-	if (element == NULL)
-		return TRUE;
+    if (element == NULL)
+        return TRUE;
 
 ```
 * If the first element is optional and should be avoided, first an attempt
   will be made to skip the element and parse the remainder of the rule.
   If this is not succesful, an attempt to parse the element is made.
 ```c
-	if (element->optional && element->avoid)
-	{
-		if (parse_rule(text_buffer, element->next))
-			return TRUE;
-	}
-		
+    if (element->optional && element->avoid)
+    {
+        if (parse_rule(text_buffer, element->next))
+            return TRUE;
+    }
+
 ```
 * The current position of the text buffer is saved, such that it can be
   restored in case the elements of the production rule cannot be parsed
   from the current position, and back-tracking is required to try another
   alternative.
 ```c
-	text_pos_t sp = text_buffer->pos;
-	
+    text_pos_t sp = text_buffer->pos;
+
 ```
 * Call the `parse_element` function to see if the first element of the production
   rule can be parsed from the current position in the production rule.
@@ -150,43 +150,43 @@ bool parse_rule(text_buffer_p text_buffer, element_p element)
   function `parse_seq` is called, otherwise the function is called
   recursively for the remainder of the elements of the production rule.
 ```c
-	if (parse_element(text_buffer, element))
-	{
-		if (element->sequence)
-		{
-			if (parse_seq(text_buffer, element))
-				return TRUE;
-		}
-		else
-		{
-			if (parse_rule(text_buffer, element->next))
-				return TRUE;
-		}
-	}
-	
+    if (parse_element(text_buffer, element))
+    {
+        if (element->sequence)
+        {
+            if (parse_seq(text_buffer, element))
+                return TRUE;
+        }
+        else
+        {
+            if (parse_rule(text_buffer, element->next))
+                return TRUE;
+        }
+    }
+    
 ```
 * At this point in the function, an instance of the first element could
   not be parsed from the current position in the text buffer or it could,
   but the remainder of the elements could not be parsed. reset the current
   position to the saved position.
 ```c
-	text_buffer_set_pos(text_buffer, &sp);
-	
+    text_buffer_set_pos(text_buffer, &sp);
+    
 ```
 * If the element was optional (and should not be avoided), see if the
   remainder of the element could be parsed from the current position
   in the text buffer.
 ```c
-	if (element->optional && !element->avoid)
-	{
-		if (parse_rule(text_buffer, element->next))
-			return TRUE;
-	}
+    if (element->optional && !element->avoid)
+    {
+        if (parse_rule(text_buffer, element->next))
+            return TRUE;
+    }
 
 ```
 * Failed to parse the rule.
 ```c
-	return FALSE;
+    return FALSE;
 }
 ```
 
@@ -209,44 +209,43 @@ bool parse_seq(text_buffer_p text_buffer, element_p element)
   the remainder of the rule. If this is not succesful, an attempt to parse the element
   is made.
 ```c
-	if (element->avoid)
-	{
-		if (parse_rule(text_buffer, element->next))
-			return TRUE;
-	}
-	
+    if (element->avoid)
+    {
+        if (parse_rule(text_buffer, element->next))
+            return TRUE;
+    }
+
 ```
 * The current position of the text buffer is saved, such that it can be
   restored in case the elements of the production rule cannot be parsed
   from the current position, and back-tracking is required to try another
   alternative.
 ```c
-	text_pos_t sp = text_buffer->pos;
-	
+    text_pos_t sp = text_buffer->pos;
+
 ```
 * Another instance of the sequence can only be parsed if there was not
   chain rule or otherwise the chain rule could be parsed at the current
   location in the text buffer.
 ```c
-	if (element->chain_rule == NULL || parse_rule(text_buffer, element->chain_rule))
-	{
-		
-		/* Try to parse the next element of the sequence */
-		if (parse_element(text_buffer, element))
-		{
-			/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
-			if (parse_seq(text_buffer, element))
-				return TRUE;
-		}
-	}
-	
+    if (element->chain_rule == NULL || parse_rule(text_buffer, element->chain_rule))
+    {
+        /* Try to parse the next element of the sequence */
+        if (parse_element(text_buffer, element))
+        {
+            /* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
+            if (parse_seq(text_buffer, element))
+                return TRUE;
+        }
+    }
+
 ```
 * At this point in the function, a repeated instance of the first element
   could not be parsed from the current position in the text buffer or it
   could, but the remainder of the elements could not be parsed.
   reset the current position to the saved location.
 ```c
-	text_buffer_set_pos(text_buffer, &sp);
+    text_buffer_set_pos(text_buffer, &sp);
 
 ```
   If we have not tried to parse the remainder of the elments of the
@@ -254,16 +253,16 @@ bool parse_seq(text_buffer_p text_buffer, element_p element)
   remainder of the element could be parsed from the current position
   in the text buffer.
 ```c
-	if (!element->avoid)
-	{
-		if (parse_rule(text_buffer, element->next))
-			return TRUE;
-	}
+    if (!element->avoid)
+    {
+        if (parse_rule(text_buffer, element->next))
+            return TRUE;
+    }
 ```
 * Failed to parse the rule.
 ```c
-	
-	return FALSE;
+
+    return FALSE;
 }
 ```
 
@@ -277,47 +276,47 @@ parsed by the function, otherwise the current location is not affected.
 ```c
 bool parse_element(text_buffer_p text_buffer, element_p element)
 {
-	switch (element->kind)
-	{
+    switch (element->kind)
+    {
 ```
 * In case the element specifies that the end of the input should be reached,
   return if this is the case
 ```c
-		case rk_end:
-			return text_buffer_end(text_buffer);
+        case rk_end:
+            return text_buffer_end(text_buffer);
 
 ```
 * In case the element specifies that a certain character is to be expected,
   check if this character occurs at the current location in the text buffer.
   If this the case, advance the current location and return `TRUE`.
 ```c
-		case rk_char:
-			if (*text_buffer->info == element->info.ch)
-			{
-				text_buffer_next(text_buffer);
-				return TRUE;
-			}
-			break;
+        case rk_char:
+            if (*text_buffer->info == element->info.ch)
+            {
+                text_buffer_next(text_buffer);
+                return TRUE;
+            }
+            break;
 
 ```
 * In case the element specifies that a certain character range is to be expected,
   check if this character at the current location in the text buffer is contained
   in the character set. If this the case, advance the current location and return `TRUE`.
 ```c
-		case rk_charset:
-			if (char_set_contains(element->info.char_set, *text_buffer->info))
-			{
-				text_buffer_next(text_buffer);
-				return TRUE;
-			}
-			break;
-		
+        case rk_charset:
+            if (char_set_contains(element->info.char_set, *text_buffer->info))
+            {
+                text_buffer_next(text_buffer);
+                return TRUE;
+            }
+            break;
+
 ```
 * In case the element specifies that a certain non-terminal is to be expected,
   return the result of calling the `parse_nt` function.
 ```c
-		case rk_nt:
-			return parse_nt(text_buffer, element->info.non_terminal);
+        case rk_nt:
+            return parse_nt(text_buffer, element->info.non_terminal);
 
 ```
 * In case the element specifies [a grouping](grammar.md#grouping), see if one of
@@ -325,16 +324,16 @@ bool parse_element(text_buffer_p text_buffer, element_p element)
   in the text buffer, by calling the function `parse_rule`. If one succeeds,
   return `TRUE`.
 ```c
-		case rk_grouping:
-			for (rules_p rule = element->info.rules; rule != NULL; rule = rule->next )
-			{
-				if (parse_rule(text_buffer, rule->elements))
-					return TRUE;
-			}
-			break;
-	}
-	
-	return FALSE;
+        case rk_grouping:
+            for (rules_p rule = element->info.rules; rule != NULL; rule = rule->next )
+            {
+                if (parse_rule(text_buffer, rule->elements))
+                    return TRUE;
+            }
+            break;
+    }
+
+    return FALSE;
 }
 ```
 

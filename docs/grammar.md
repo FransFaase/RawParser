@@ -19,9 +19,9 @@ pointer to a collection of production rules:
 typedef struct non_terminal non_terminal_t, *non_terminal_p;
 struct non_terminal
 {
-	const char *name;     /* Name of the non-terminal */
-	rules_p normal;       /* Normal rules */
-	rules_p recursive;    /* Left-recursive rules */
+    const char *name;     /* Name of the non-terminal */
+    rules_p normal;       /* Normal rules */
+    rules_p recursive;    /* Left-recursive rules */
 };
 ```
 ## Production rules
@@ -36,8 +36,8 @@ type for a pointer to elements of a production rule:
 typedef struct rules *rules_p;
 struct rules
 {
-	element_p elements;     /* The rule definition */
-	rules_p next;           /* Next rule */
+    element_p elements;     /* The rule definition */
+    rules_p next;           /* Next rule */
 };
 ```
 
@@ -53,28 +53,28 @@ This leads to the following type definitions (which is going to be extended belo
 ```c
 enum element_kind_t
 {
-	rk_nt,       /* A non-terminal */
-	rk_char,     /* A character */
-	rk_end       /* End of input */
+    rk_nt,       /* A non-terminal */
+    rk_char,     /* A character */
+    rk_end       /* End of input */
 };
 
 typedef struct element *element_p;
 struct element
 {
-	enum element_kind_t kind;   /* Kind of element */
-	union 
-	{
-		non_terminal_p non_terminal; /* rk_nt: Pointer to non-terminal */
-		char ch;                     /* rk_char: The character */
-	} info;
-	
-	element_p next;             /* Next element in the rule */
+    enum element_kind_t kind;   /* Kind of element */
+    union
+    {
+        non_terminal_p non_terminal; /* rk_nt: Pointer to non-terminal */
+        char ch;                     /* rk_char: The character */
+    } info;
+
+    element_p next;             /* Next element in the rule */
 };
 
 void element_init(element_p element, enum element_kind_t kind)
 {
-	element->kind = kind;
-	element->next = NULL;
+    element->kind = kind;
+    element->next = NULL;
 }
 ```
 
@@ -98,18 +98,18 @@ Now we can extend the element definiton as follows:
 ```c
 enum element_kind_t
 {
-	...,
-	rk_charset  /* A character set */
+    ...,
+    rk_charset  /* A character set */
 };
 
 struct element
 {
-	...
-	union
-	{
-		...
-		char_set_p char_set;         /* rk_charset: Pointer to character set definition */
-	} info;
+    ...
+    union
+    {
+        ...
+        char_set_p char_set;         /* rk_charset: Pointer to character set definition */
+    } info;
 };
 ```
 
@@ -117,8 +117,8 @@ We also add a function to initialize an element:
 ```c
 void element_init(element_p element, enum element_kind_t kind)
 {
-	element->kind = kind;
-	element->next = NULL;
+    element->kind = kind;
+    element->next = NULL;
 }
 ```
 
@@ -133,18 +133,18 @@ the type for an element in a production rule in the following manner:
 ```c
 struct element
 {
-	...
-	bool optional;     /* Whether the element is optional */
-	bool sequence;     /* Whether the element is a sequenct */
-	bool avoid;        /* Whether the elmennt should be avoided when it is optional and/or sequential */
+    ...
+    bool optional;     /* Whether the element is optional */
+    bool sequence;     /* Whether the element is a sequence */
+    bool avoid;        /* Whether the elmennt should be avoided when it is optional and/or sequential */
 };
 
 void element_init(element_p element, enum element_kind_t kind)
 {
-	...
-	element->optional = FALSE;
-	element->sequence = FALSE;
-	element->avoid = FALSE;
+    ...
+    element->optional = FALSE;
+    element->sequence = FALSE;
+    element->avoid = FALSE;
 }
 ```
 ## Chain
@@ -154,14 +154,14 @@ a separate production rule. This is done in the following manner:
 ```c
 struct element
 {
-	...
-	element_p chain_rule;     /* Chain rule, for between the sequential elements */
+    ...
+    element_p chain_rule;     /* Chain rule, for between the sequential elements */
 };
 
 void element_init(element_p element, enum element_kind_t kind)
 {
-	...
-	element->chain_rule = NULL;
+    ...
+    element->chain_rule = NULL;
 }
 ```
 
@@ -174,18 +174,18 @@ extension:
 ```c
 enum element_kind_t
 {
-	...,
-	rk_grouping  /* Grouping of one or more rules */
+    ...,
+    rk_grouping  /* Grouping of one or more rules */
 };
 
 struct element
 {
-	...
-	union
-	{
-		...
-		rules_p rules;               /* rk_grouping: Pointer to the rules */
-	} info;
+    ...
+    union
+    {
+        ...
+        rules_p rules;               /* rk_grouping: Pointer to the rules */
+    } info;
 };
 ```
 
@@ -199,8 +199,8 @@ manner
 typedef struct non_terminal_dict *non_terminal_dict_p;
 struct non_terminal_dict
 {
-	non_terminal_t elem;
-	non_terminal_dict_p next;
+    non_terminal_t elem;
+    non_terminal_dict_p next;
 };
 ```
 And a function to find or add a non-terminal to the dictionary with a given string
@@ -309,24 +309,24 @@ typedef unsigned char byte;
 typedef struct char_set *char_set_p;
 struct char_set
 {
-	byte bitvec[32];
+    byte bitvec[32];
 };
 
 char_set_p new_char_set()
 {
-	char_set_p char_set = MALLOC(struct char_set);
-	for (int i = 0; i < 32; i++)
-		char_set->bitvec[i] = 0;
-	return char_set;
+    char_set_p char_set = MALLOC(struct char_set);
+    for (int i = 0; i < 32; i++)
+        char_set->bitvec[i] = 0;
+    return char_set;
 }
 
 bool char_set_contains(char_set_p char_set, const char ch) { return (char_set->bitvec[((byte)ch) >> 3] & (1 << (((byte)ch) & 0x7))) != 0; }
 void char_set_add_char(char_set_p char_set, char ch) { char_set->bitvec[((byte)ch) >> 3] |= 1 << (((byte)ch) & 0x7); }
 void char_set_add_range(char_set_p char_set, char first, char last)
 {
-	byte ch = (byte)first;
-	for (; ((byte)first) <= ch && ch <= ((byte)last); ch++)
-		char_set_add_char(char_set, ch);
+    byte ch = (byte)first;
+    for (; ((byte)first) <= ch && ch <= ((byte)last); ch++)
+        char_set_add_char(char_set, ch);
 }
 
 ```
@@ -337,31 +337,32 @@ void char_set_add_range(char_set_p char_set, char first, char last)
 
 non_terminal_p find_nt(const char *name, non_terminal_dict_p *p_nt)
 {
-   while (*p_nt != NULL && (*p_nt)->elem.name != name && strcmp((*p_nt)->elem.name, name) != 0)
-		p_nt = &((*p_nt)->next);
+    while (*p_nt != NULL && (*p_nt)->elem.name != name && strcmp((*p_nt)->elem.name, name) != 0)
+        p_nt = &((*p_nt)->next);
 
-   if (*p_nt == NULL)
-   {   *p_nt = MALLOC(struct non_terminal_dict);
-	   (*p_nt)->elem.name = name;
-	   (*p_nt)->elem.normal = NULL;
-	   (*p_nt)->elem.recursive = NULL;
-	   (*p_nt)->next = NULL;
-   }
-   return &(*p_nt)->elem;
+    if (*p_nt == NULL)
+    {
+        *p_nt = MALLOC(struct non_terminal_dict);
+        (*p_nt)->elem.name = name;
+        (*p_nt)->elem.normal = NULL;
+        (*p_nt)->elem.recursive = NULL;
+        (*p_nt)->next = NULL;
+    }
+    return &(*p_nt)->elem;
 }
 
 rules_p new_rule()
 {
-	rules_p rule = MALLOC(struct rules);
-	rule->elements = NULL;
-	rule->next = NULL;
-	return rule;
+    rules_p rule = MALLOC(struct rules);
+    rule->elements = NULL;
+    rule->next = NULL;
+    return rule;
 }
 
 element_p new_element(enum element_kind_t kind)
 {
-	element_p element = MALLOC(struct element);
-	element_init(element, kind);
-	return element;
+    element_p element = MALLOC(struct element);
+    element_init(element, kind);
+    return element;
 }
 ```
