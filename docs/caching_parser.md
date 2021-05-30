@@ -82,7 +82,8 @@ replaced by `parser_p parser`.
 
 ## Parse a non-terminal
 
-Below the adapted function definition for parsing a non-terminal is given.
+Below the adapted function definition for [parsing a non-terminal](simple_parser.md#parse-a-non-terminal)
+is given.
 ```c
 bool parse_nt(parser_p parser, non_terminal_p non_term)
 {
@@ -188,8 +189,8 @@ bool parse_nt(parser_p parser, non_terminal_p non_term)
 
 ## Parse a rule
 
-The `parse_rule` function is only adapted with respect to the usage of the parser
-structure.
+[The `parse_rule` function](simple_parser.md#parse-a-rule) is only adapted
+with respect to the usage of the parser structure.
 ```c
 bool parse_rule(parser_p parser, element_p element)
 {
@@ -232,8 +233,8 @@ bool parse_rule(parser_p parser, element_p element)
 
 ## Parse a sequence
 
-The `parse_seq` function is only adapted with respect to the usage of the parser
-structure.
+[The `parse_seq` function](simple_parser.md#parse-a-sequence) is only adapted with
+respect to the usage of the parser structure.
 ```c
 bool parse_seq(parser_p parser, element_p element)
 {
@@ -270,8 +271,8 @@ bool parse_seq(parser_p parser, element_p element)
 
 ## Parse an element of a rule
 
-The `parse_element` function is only adapted with respect to the usage of the parser
-structure.
+[The `parse_element` function](simple_parser.md#parse-an-element-of-a-rule) is only
+adapted with respect to the usage of the parser structure.
 ```c
 bool parse_element(parser_p parser, element_p element)
 {
@@ -385,3 +386,8 @@ cache_item_p solutions_find(cache_p cache, text_pos_p pos, non_terminal_p nt)
     return &sol->cache_item;
 }
 ```
+
+# Continue...
+
+The caching parser can be tested with [the caching parser test](simple_parser_test.md).
+Continue reading the development of the parser on [the greedy modifier](greedy_modifier.md).

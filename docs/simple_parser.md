@@ -337,3 +337,7 @@ bool parse_element(text_buffer_p text_buffer, element_p element)
 }
 ```
 
+# Continue...
+
+The simple parser can be tested with [the simple parser test](simple_parser_test.md).
+For how the simple parser can be improved, read [the caching parser](caching_parser.md).

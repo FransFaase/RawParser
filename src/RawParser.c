@@ -1186,7 +1186,6 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 	/* Store the current position */
 	text_pos_t sp = parser->text_buffer->pos;
 	
-	DECL_RESULT(part_result);
 	if (element->sequence)
 	{
 		/* The first element of the fule is a sequence. */

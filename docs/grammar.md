@@ -366,3 +366,8 @@ element_p new_element(enum element_kind_t kind)
     return element;
 }
 ```
+
+# Continue...
+
+This grammar is the input for [the simple parser](simple_parser.md).
+

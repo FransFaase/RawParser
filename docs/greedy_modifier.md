@@ -102,7 +102,8 @@ bool parse_rule(parser_p parser, element_p element)
         }
         else
 ```
-*  
+*  The element was not parsed and it is not optional, which means that
+   parsing the rule has failed:
 ```c
             return FALSE;
     }
