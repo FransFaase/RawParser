@@ -42,7 +42,7 @@ still many ad hoc decisions that are debatable.
 
 ## Documentation
 
-I have also started to document the code in a [literary programming](https://en.wikipedia.org/wiki/Literate_programming)
+I have also started to document the code in a [literate programming](https://en.wikipedia.org/wiki/Literate_programming)
 style with fragments of code that are extended in steps as described in
 [Literate programming with Markdown](https://www.iwriteiam.nl/D2101.html#13).
 See:
