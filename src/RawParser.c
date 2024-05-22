@@ -372,6 +372,7 @@ char_set_p new_char_set()
 
 bool char_set_contains(char_set_p char_set, const char ch) { return (char_set->bitvec[((byte)ch) >> 3] & (1 << (((byte)ch) & 0x7))) != 0; }
 void char_set_add_char(char_set_p char_set, char ch) { char_set->bitvec[((byte)ch) >> 3] |= 1 << (((byte)ch) & 0x7); }
+void char_set_remove_char(char_set_p char_set, char ch) { char_set->bitvec[((byte)ch) >> 3] &= ~(1 << (((byte)ch) & 0x7)); }
 void char_set_add_range(char_set_p char_set, char first, char last)
 {
 	byte ch = (byte)first;
@@ -511,6 +512,7 @@ void element_print(FILE *f, element_p element)
 #define CHAR(C) _NEW_GR(rk_char) element->info.ch = C;
 #define CHARSET(F) _NEW_GR(rk_charset) element->info.char_set = new_char_set(); element->add_char_function = F;
 #define ADD_CHAR(C) char_set_add_char(element->info.char_set, C);
+#define REMOVE_CHAR(C) char_set_remove_char(element->info.char_set, C);
 #define ADD_RANGE(F,T) char_set_add_range(element->info.char_set, F, T);
 #define END_FUNCTION(F) rules->end_function = F;
 #define GROUPING _NEW_GR(rk_grouping) element->info.rules = new_rule(); rules_p* ref_rule = &element->info.rules; rules_p rules; element_p* ref_element; element_p element;
@@ -1411,12 +1413,13 @@ bool parse_element(parser_p parser, element_p element, const result_p prev_resul
 		case rk_grouping:
 			{
 				/* Try all rules in the grouping */
-				DECL_RESULT(grouping_result);
+				DECL_RESULT(rule_result);
 				rules_p rule = element->info.rules;
 				for ( ; rule != NULL; rule = rule->next )
 				{
 					DECL_RESULT(start);
-					if (parse_rule(parser, rule->elements, &start, rule, result))
+					result_assign(&start, prev_result);
+					if (parse_rule(parser, rule->elements, &start, rule, &rule_result))
 					{
 						DISP_RESULT(start);
 						break;
@@ -1426,20 +1429,20 @@ bool parse_element(parser_p parser, element_p element, const result_p prev_resul
 				if (rule == NULL)
 				{
 					/* Non of the rules worked */
-					DISP_RESULT(grouping_result)
+					DISP_RESULT(rule_result)
 					return FALSE;
 				}
 				
 				/* Combine the result of the rule with the previous result */
 				if (element->add_function == 0)
-					result_assign(result, prev_result);
-				else if (!(*element->add_function)(prev_result, &grouping_result, result))
+					result_assign(result, &rule_result);
+				else if (!(*element->add_function)(prev_result, &rule_result, result))
 				{
-					DISP_RESULT(grouping_result)
+					DISP_RESULT(rule_result)
 					text_buffer_set_pos(parser->text_buffer, &sp);
 					return FALSE;
 				}
-				DISP_RESULT(grouping_result)
+				DISP_RESULT(rule_result)
 			}
 			break;
 		case rk_end:
@@ -2075,6 +2078,172 @@ void test_ident_grammar(non_terminal_dict_p *all_nt)
 	test_parse_ident(all_nt, "_123");
 }
 
+/*
+	Char result
+	~~~~~~~~~~~
+
+	The struct for representing the char has but a single member
+	(besides the member for the reference counting base).
+*/
+
+typedef struct char_data
+{
+	ref_counted_base_t _base;
+	char ch;
+	text_pos_t ps;
+} *char_data_p;
+
+void print_single_char(char ch, ostream_p ostream)
+{
+	if (ch == '\0')
+		ostream_puts(ostream, "\\0");
+	else if (ch == '\'')
+		ostream_puts(ostream, "\\'");
+	else if (ch == '\n')
+		ostream_puts(ostream, "\\n");
+	else
+		ostream_put(ostream, ch);
+}
+
+void char_data_print(void *data, ostream_p ostream)
+{
+	ostream_puts(ostream, "char '");
+	print_single_char(((char_data_p)data)->ch, ostream);
+	ostream_puts(ostream, "'");
+}
+
+void char_set_pos(result_p result, text_pos_p ps)
+{
+	char_data_p char_data = MALLOC(struct char_data);
+	char_data->ps = *ps;
+	char_data->_base.release = 0;
+	result_assign_ref_counted(result, char_data, char_data_print);
+}
+
+bool escaped_char(result_p prev, char ch, result_p result)
+{
+	result_assign(result, prev);
+	((char_data_p)result->data)->ch = ch == '0' ? '\0' : ch == 'n' ? '\n' : ch;
+	return TRUE;
+}
+
+bool normal_char(result_p prev, char ch, result_p result)
+{
+	result_assign(result, prev);
+	((char_data_p)result->data)->ch = ch;
+	return TRUE;
+}
+
+/*	Char tree node structure */
+
+typedef struct char_node_t *char_node_p;
+struct char_node_t
+{
+	tree_node_t _node;
+	char ch;
+};
+
+const char *char_node_type = "char";
+
+void char_node_print(void *data, ostream_p ostream)
+{
+	ostream_puts(ostream, "char '");
+	print_single_char(((char_node_p)data)->ch, ostream);
+	ostream_puts(ostream, "'");
+}
+
+bool create_char_tree(const result_p rule_result, void* data, result_p result)
+{
+	char_data_p char_data = (char_data_p)rule_result->data;
+
+	char_node_p char_node = MALLOC(struct char_node_t);
+	init_tree_node(&char_node->_node, char_node_type, NULL);
+	tree_node_set_pos(&char_node->_node, &char_data->ps);
+	char_node->ch = char_data->ch;
+	result_assign_ref_counted(result, char_node, char_node_print);
+	return TRUE;
+}
+
+/*  Char grammar  */
+
+void char_grammar(non_terminal_dict_p *all_nt)
+{
+	HEADER(all_nt)
+	
+	NT_DEF("char")
+		RULE
+			CHAR('\'') SET_PS(char_set_pos)
+			{ GROUPING
+				RULE // Escaped character
+					CHAR('\\') CHARSET(escaped_char) ADD_CHAR('0') ADD_CHAR('\'') ADD_CHAR('\\') ADD_CHAR('n')
+				RULE // Normal character
+					CHARSET(normal_char) ADD_RANGE(' ', 126) REMOVE_CHAR('\\') REMOVE_CHAR('\'')
+			}
+			CHAR('\'')
+			END_FUNCTION(create_char_tree)
+}
+
+/*
+	Char tests
+	~~~~~~~~~~
+*/
+
+void test_parse_char(non_terminal_dict_p *all_nt, const char *input, char ch)
+{
+	text_buffer_t text_buffer;
+	text_buffer_assign_string(&text_buffer, input);
+	
+	solutions_t solutions;
+	solutions_init(&solutions, &text_buffer);
+	
+	parser_t parser;
+	parser_init(&parser, &text_buffer);
+	parser.cache_hit_function = solutions_find;
+	parser.cache = &solutions;
+	
+	DECL_RESULT(result);
+	if (parse_nt(&parser, find_nt("char", all_nt), &result) && text_buffer_end(&text_buffer))
+	{
+		if (result.data == NULL)
+			fprintf(stderr, "ERROR: parsing '%s' did not return result\n", input);
+		else
+		{
+			tree_node_p tree_node = (tree_node_p)result.data;
+			if (tree_node->line != 1 && tree_node->column != 1)
+				fprintf(stderr, "WARNING: tree node position %d:%d is not 1:1\n", tree_node->line, tree_node->column);
+			if (tree_node->type_name != char_node_type)
+				fprintf(stderr, "ERROR: tree node is not of type char_node_type\n");
+			else
+			{
+				char_node_p char_node = (char_node_p)tree_node;
+				if (char_node->ch != ch)
+					fprintf(stderr, "ERROR: parsed value '%c' from '%s' instead of expected '%c'\n",
+					char_node->ch, input, ch);
+				else
+					fprintf(stderr, "OK: parsed char %d from '%s'\n", char_node->ch, input);
+			}
+		}
+	}
+	else
+	{
+		fprintf(stderr, "ERROR: failed to parse char from '%s'\n", input);
+	}
+	DISP_RESULT(result);
+	
+	solutions_free(&solutions);
+}
+
+void test_char_grammar(non_terminal_dict_p *all_nt)
+{
+	test_parse_char(all_nt, "'c'", 'c');
+	test_parse_char(all_nt, "'\\0'", '\0');
+	test_parse_char(all_nt, "'\\''", '\'');
+	test_parse_char(all_nt, "'\\\\'", '\\');
+	test_parse_char(all_nt, "'\\n'", '\n');
+}
+
+
+
 bool equal_string(result_p result, const void *argument)
 {
 	const char *keyword_name = (const char*)argument;
@@ -2556,6 +2725,9 @@ int main(int argc, char *argv[])
 
 	ident_grammar(&all_nt);
 	test_ident_grammar(&all_nt);
+	
+	char_grammar(&all_nt);
+	test_char_grammar(&all_nt);
 
 	non_terminal_dict_p all_nt_c_grammar = NULL;
 	c_grammar(&all_nt_c_grammar);
