@@ -233,7 +233,8 @@ struct element
 	enum element_kind_t kind;   /* Kind of element */
 	bool optional;              /* Whether the element is optional */
 	bool sequence;              /* Whether the element is a sequenct */
-	bool avoid;                 /* Whether the elmennt should be avoided when it is optional and/or sequential */
+	bool back_tracking;         /* Whether a sequence is back-tracking */
+	bool avoid;                 /* Whether the elmeent should be avoided when it is optional and/or sequential. */
 	element_p chain_rule;       /* Chain rule, for between the sequential elements */
 	union 
 	{   non_terminal_p non_terminal; /* rk_nt: Pointer to non-terminal */
@@ -328,6 +329,7 @@ void element_init(element_p element, enum element_kind_t kind)
 	element->next = NULL;
 	element->optional = FALSE;
 	element->sequence = FALSE;
+	element->back_tracking = FALSE;
 	element->avoid = FALSE;
 	element->chain_rule = NULL;
 	element->add_char_function = 0;
@@ -479,7 +481,8 @@ void element_print(FILE *f, element_p element)
 	}
 
 	if (element->sequence)
-	{   if (element->chain_rule == NULL)
+	{
+		if (element->chain_rule == NULL)
 			fprintf(f, "SEQ ");
 		else
 		{
@@ -487,6 +490,8 @@ void element_print(FILE *f, element_p element)
 			element_print(f, element->chain_rule);
 			fprintf(f, ")");
 		}
+		if (element->back_tracking)
+			fprintf(f, "BACK_TRACKING ");
 	}
 	if (element->optional)
 		fprintf(f, "OPT ");
@@ -507,6 +512,7 @@ void element_print(FILE *f, element_p element)
 #define SEQ(S,E) element->sequence = TRUE; element->begin_seq_function = S; element->add_seq_function = E;
 #define CHAIN element_p* ref_element = &element->chain_rule; element_p element;
 #define OPT(F) element->optional = TRUE; element->add_skip_function = F;
+#define BACK_TRACKING element->back_tracking = TRUE;
 #define AVOID element->avoid = TRUE;
 #define SET_PS(F) element->set_pos = F;
 #define CHAR(C) _NEW_GR(rk_char) element->info.ch = C;
@@ -1200,14 +1206,86 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 		DECL_RESULT(seq_elem);
 		if (parse_element(parser, element, &seq_begin, &seq_elem))
 		{
-			/* Now parse the remainder elements of the sequence (and thereafter the remainder of the rule. */
-			if (parse_seq(parser, element, &seq_elem, prev_result, rule, rule_result))
+			if (element->back_tracking)
 			{
-				DISP_RESULT(seq_elem);
+				/* Now parse the remainder elements of the sequence (and thereafter the remainder of the rule. */
+				if (parse_seq(parser, element, &seq_elem, prev_result, rule, rule_result))
+				{
+					DISP_RESULT(seq_elem);
+					DISP_RESULT(seq_begin);
+					DEBUG_EXIT("parse_rule = ");
+					DEBUG_PT(rule_result); DEBUG_NL;
+					return TRUE;
+				}
+			}
+			else
+			{
 				DISP_RESULT(seq_begin);
-				DEBUG_EXIT("parse_rule = ");
-				DEBUG_PT(rule_result); DEBUG_NL;
-				return TRUE;
+				
+				/* Now continue parsing more elements */
+				for (;;)
+				{
+					if (element->avoid)
+					{
+						DECL_RESULT(result);
+						if (element->add_seq_function != NULL && !element->add_seq_function(prev_result, &seq_elem, &result))
+						{
+							DISP_RESULT(result);
+							DISP_RESULT(seq_elem);
+							return FALSE;
+						}
+						if (parse_rule(parser, element->next, &result, rule, rule_result))
+						{
+							DISP_RESULT(result);
+							DISP_RESULT(seq_elem);
+							return TRUE;
+						}
+						DISP_RESULT(result);
+					}
+					
+					/* Store the current position */
+					text_pos_t sp = parser->text_buffer->pos;
+					
+					if (element->chain_rule != NULL)
+					{
+						DECL_RESULT(dummy_chain_elem);
+						bool parsed_chain = parse_rule(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem);
+						DISP_RESULT(dummy_chain_elem);
+						if (!parsed_chain)
+							break;
+					}
+					
+					DECL_RESULT(next_seq_elem);
+					if (parse_element(parser, element, &seq_elem, &next_seq_elem))
+					{
+						result_assign(&seq_elem, &next_seq_elem);
+					}
+					else
+					{
+						/* Failed to parse the next element of the sequence: reset the current position to the saved position. */
+						text_buffer_set_pos(parser->text_buffer, &sp);
+						DISP_RESULT(next_seq_elem);
+						break;
+					}
+					DISP_RESULT(next_seq_elem);
+				}
+				
+				DECL_RESULT(result);
+				if (element->add_seq_function != NULL && !element->add_seq_function(prev_result, &seq_elem, &result))
+				{
+					DISP_RESULT(seq_elem);
+					DISP_RESULT(result);
+					return FALSE;
+				}
+				DISP_RESULT(seq_elem);
+				if (parse_rule(parser, element->next, &result, rule, rule_result))
+				{
+					DISP_RESULT(result);
+					DEBUG_EXIT("parse_rule = ");
+					DEBUG_PT(rule_result); DEBUG_NL;
+					return TRUE;
+				}
+				DISP_RESULT(result);
 			}
 		}
 		DISP_RESULT(seq_begin);
@@ -1300,29 +1378,14 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 	text_pos_t sp = parser->text_buffer->pos;
 
 	/* If a chain rule is defined, try to parse it.*/
+	bool go = TRUE;
 	if (element->chain_rule != NULL)
 	{
 		DECL_RESULT(dummy_chain_elem);
-		if (parse_rule(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem))
-		{
-			/* If the chain rule was succesful, an element should follow. */
-			DISP_RESULT(dummy_chain_elem);
-			DECL_RESULT(seq_elem);
-			if (parse_element(parser, element, prev_seq, &seq_elem))
-			{
-				/* If succesful, try to parse the remainder of the sequence (and thereafter the remainder of the rule) */
-				if (parse_seq(parser, element, &seq_elem, prev, rule, rule_result))
-				{
-					DISP_RESULT(seq_elem);
-					return TRUE;
-				}
-			}
-			DISP_RESULT(seq_elem);
-			return FALSE;
-		}
+		go = parse_rule(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem);
 		DISP_RESULT(dummy_chain_elem);
 	}
-	else
+	if (go)
 	{
 		/* Try to parse the next element of the sequence */
 		DECL_RESULT(seq_elem);
@@ -2082,7 +2145,8 @@ void test_ident_grammar(non_terminal_dict_p *all_nt)
 	Char result
 	~~~~~~~~~~~
 
-	The struct for representing the char has but a single member
+	The struct for representing the char has but two members,
+	one for the character and one for the start position.
 	(besides the member for the reference counting base).
 */
 
@@ -2120,18 +2184,16 @@ void char_set_pos(result_p result, text_pos_p ps)
 	result_assign_ref_counted(result, char_data, char_data_print);
 }
 
-bool escaped_char(result_p prev, char ch, result_p result)
-{
-	result_assign(result, prev);
-	((char_data_p)result->data)->ch = ch == '0' ? '\0' : ch == 'n' ? '\n' : ch;
-	return TRUE;
-}
-
 bool normal_char(result_p prev, char ch, result_p result)
 {
 	result_assign(result, prev);
 	((char_data_p)result->data)->ch = ch;
 	return TRUE;
+}
+
+bool escaped_char(result_p prev, char ch, result_p result)
+{
+	return normal_char(prev, ch == '0' ? '\0' : ch == 'n' ? '\n' : ch, result);
 }
 
 /*	Char tree node structure */
