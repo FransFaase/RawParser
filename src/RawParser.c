@@ -1135,7 +1135,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 	if (element == NULL)
 	{
 		/* At the end of the rule: */
-		if (rule->end_function == 0)
+		if (rule == NULL || rule->end_function == 0)
 			result_assign(rule_result, prev_result);
 		else if (!rule->end_function(prev_result, rule->end_function_data, rule_result))
 		{
@@ -1248,8 +1248,10 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 					
 					if (element->chain_rule != NULL)
 					{
+						DECL_RESULT(dummy_prev_result);
 						DECL_RESULT(dummy_chain_elem);
-						bool parsed_chain = parse_rule(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem);
+						bool parsed_chain = parse_rule(parser, element->chain_rule, &dummy_prev_result, NULL, &dummy_chain_elem);
+						DISP_RESULT(dummy_prev_result);
 						DISP_RESULT(dummy_chain_elem);
 						if (!parsed_chain)
 							break;
@@ -1381,8 +1383,10 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 	bool go = TRUE;
 	if (element->chain_rule != NULL)
 	{
+		DECL_RESULT(dummy_prev_result);
 		DECL_RESULT(dummy_chain_elem);
-		go = parse_rule(parser, element->chain_rule, NULL, NULL, &dummy_chain_elem);
+		go = parse_rule(parser, element->chain_rule, &dummy_prev_result, NULL, &dummy_chain_elem);
+		DISP_RESULT(dummy_prev_result);
 		DISP_RESULT(dummy_chain_elem);
 	}
 	if (go)
@@ -2304,6 +2308,215 @@ void test_char_grammar(non_terminal_dict_p *all_nt)
 	test_parse_char(all_nt, "'\\n'", '\n');
 }
 
+/*
+	String result
+	~~~~~~~~~~~~~
+	
+	The struct representing the string has several members.
+	But we first need to define a string buffer type that is
+	needed as a temporary storage while the string is parsed
+	before memory is allocated to contain the whole string.
+*/
+
+typedef struct string_buffer *string_buffer_p;
+struct string_buffer
+{
+	char buf[100];
+	string_buffer_p next;
+};
+string_buffer_p global_string_buffer = NULL;
+
+typedef struct string_data
+{
+	ref_counted_base_t _base;
+	string_buffer_p buffer;
+	size_t length;
+	text_pos_t ps;
+} *string_data_p;
+
+void string_data_print(void *data, ostream_p ostream)
+{
+	string_data_p string_data = (string_data_p)data;
+	ostream_puts(ostream, "char \"");
+	string_buffer_p string_buffer = global_string_buffer;
+	int j = 0;
+	for (size_t i = 0; i < string_data->length; i++)
+	{
+		if (++j > 100)
+		{
+			string_buffer = string_buffer->next;
+			if (string_buffer == NULL)
+				break;
+			j = 0;
+		}
+		print_single_char(string_buffer->buf[j], ostream);
+	}
+	ostream_puts(ostream, "\"");
+}
+
+void string_set_pos(result_p result, text_pos_p ps)
+{
+	if (result->data == NULL)
+	{
+		string_data_p string_data = MALLOC(struct string_data);
+		string_data->ps = *ps;
+		string_data->buffer = NULL;
+		string_data->length = 0;
+		string_data->_base.release = 0;
+		result_assign_ref_counted(result, string_data, string_data_print);
+	}
+}
+
+bool string_data_add_normal_char(result_p prev, char ch, result_p result)
+{
+	result_assign(result, prev);
+	string_data_p string_data = (string_data_p)result->data;
+	int j = string_data->length % 100;
+	if (string_data->length == 0)
+	{
+		if (global_string_buffer == NULL)
+			global_string_buffer = MALLOC(struct string_buffer);
+		string_data->buffer = global_string_buffer;
+	}
+	else if (j == 0)
+	{
+		if (string_data->buffer->next == NULL)
+			string_data->buffer->next = MALLOC(struct string_buffer);
+		string_data->buffer = string_data->buffer->next;
+	}
+	string_data->buffer->buf[j++] = ch;
+	string_data->length++;
+	return TRUE;
+}
+
+bool string_data_add_escaped_char(result_p prev, char ch, result_p result)
+{
+	return string_data_add_normal_char(prev, ch == '0' ? '\0' : ch == 'n' ? '\n' : ch, result);
+}
+
+/*	String tree node structure */
+
+typedef struct string_node_t *string_node_p;
+struct string_node_t
+{
+	tree_node_t _node;
+	const char *str;
+};
+
+const char *string_node_type = "string";
+
+void string_node_print(void *data, ostream_p ostream)
+{
+	string_node_p string_node = (string_node_p)data;
+	ostream_puts(ostream, "string \"");
+	for (const char *s = string_node->str; *s != '\0'; s++)
+		print_single_char(*s, ostream);
+	ostream_puts(ostream, "\"");
+}
+
+bool create_string_tree(const result_p rule_result, void* data, result_p result)
+{
+	string_data_p string_data = (string_data_p)rule_result->data;
+	
+	string_node_p string_node = MALLOC(struct string_node_t);
+	init_tree_node(&string_node->_node, string_node_type, NULL);
+	tree_node_set_pos(&string_node->_node, &string_data->ps);
+	char *s = MALLOC_N(string_data->length + 1, char);
+	string_node->str = s;
+	string_buffer_p string_buffer = global_string_buffer;
+	int j = 0;
+	for (size_t i = 0; i < string_data->length; i++)
+	{
+		if (string_buffer == NULL)
+			break;
+		*s++ = string_buffer->buf[j++];
+		if (j > 100)
+		{
+			string_buffer = string_buffer->next;
+			j = 0;
+		}
+	}
+	*s = '\0';
+	result_assign_ref_counted(result, string_node, string_node_print);
+	return TRUE;
+}
+		
+/*	String grammar */
+
+void string_grammar(non_terminal_dict_p *all_nt)
+{
+	HEADER(all_nt)
+	
+	NT_DEF("string")
+		RULE
+			{ GROUPING
+				RULE
+					CHAR('"') SET_PS(string_set_pos)
+					{ GROUPING
+						RULE // Escaped character
+							CHAR('\\') CHARSET(string_data_add_escaped_char) ADD_CHAR('0') ADD_CHAR('\'') ADD_CHAR('\\') ADD_CHAR('n')
+						RULE // Normal character
+							CHARSET(string_data_add_normal_char) ADD_RANGE(' ', 126) REMOVE_CHAR('\\') REMOVE_CHAR('"')
+					} SEQ(pass_to_sequence, use_sequence_result) OPT(0)
+					CHAR('"')
+			} SEQ(pass_to_sequence, use_sequence_result) { CHAIN NTF("white_space", 0) }
+			END_FUNCTION(create_string_tree)
+}
+
+void test_parse_string(non_terminal_dict_p *all_nt, const char *input, const char *str)
+{
+	text_buffer_t text_buffer;
+	text_buffer_assign_string(&text_buffer, input);
+	
+	solutions_t solutions;
+	solutions_init(&solutions, &text_buffer);
+	
+	parser_t parser;
+	parser_init(&parser, &text_buffer);
+	parser.cache_hit_function = solutions_find;
+	parser.cache = &solutions;
+	
+	DECL_RESULT(result);
+	if (parse_nt(&parser, find_nt("string", all_nt), &result) && text_buffer_end(&text_buffer))
+	{
+		if (result.data == NULL)
+			fprintf(stderr, "ERROR: parsing '%s' did not return result\n", input);
+		else
+		{
+			tree_node_p tree_node = (tree_node_p)result.data;
+			if (tree_node->line != 1 && tree_node->column != 1)
+				fprintf(stderr, "WARNING: tree node position %d:%d is not 1:1\n", tree_node->line, tree_node->column);
+			if (tree_node->type_name != string_node_type)
+				fprintf(stderr, "ERROR: tree node is not of type string_node_type\n");
+			else
+			{
+				string_node_p string_node = (string_node_p)tree_node;
+				if (strcmp(string_node->str, str) != 0)
+					fprintf(stderr, "ERROR: parsed value '%s' from '%s' instead of expected '%s'\n",
+					string_node->str, input, str);
+				else
+					fprintf(stderr, "OK: parsed string \"%s\" from \"%s\"\n", string_node->str, input);
+			}
+		}
+	}
+	else
+	{
+		fprintf(stderr, "ERROR: failed to parse string from '%s'\n", input);
+	}
+	DISP_RESULT(result);
+	
+	solutions_free(&solutions);
+}
+
+void test_string_grammar(non_terminal_dict_p *all_nt)
+{
+	test_parse_string(all_nt, "\"abc\"", "abc");
+	test_parse_string(all_nt, "\"\\0\"", "");
+	test_parse_string(all_nt, "\"\\'\"", "\'");
+	test_parse_string(all_nt, "\"\\\\\"", "\\");
+	test_parse_string(all_nt, "\"\\n\"", "\n");
+}
+
 
 
 bool equal_string(result_p result, const void *argument)
@@ -2790,7 +3003,10 @@ int main(int argc, char *argv[])
 	
 	char_grammar(&all_nt);
 	test_char_grammar(&all_nt);
-
+	
+	string_grammar(&all_nt);
+	test_string_grammar(&all_nt);
+	
 	non_terminal_dict_p all_nt_c_grammar = NULL;
 	c_grammar(&all_nt_c_grammar);
     test_c_grammar(&all_nt_c_grammar);
