@@ -516,6 +516,7 @@ void element_print(FILE *f, element_p element)
 #define AVOID element->avoid = TRUE;
 #define SET_PS(F) element->set_pos = F;
 #define CHAR(C) _NEW_GR(rk_char) element->info.ch = C;
+#define CHARF(C,F) CHAR(C) element->add_char_function = F;
 #define CHARSET(F) _NEW_GR(rk_charset) element->info.char_set = new_char_set(); element->add_char_function = F;
 #define ADD_CHAR(C) char_set_add_char(element->info.char_set, C);
 #define REMOVE_CHAR(C) char_set_remove_char(element->info.char_set, C);
@@ -2513,9 +2514,234 @@ void test_string_grammar(non_terminal_dict_p *all_nt)
 	test_parse_string(all_nt, "\"abc\"", "abc");
 	test_parse_string(all_nt, "\"\\0\"", "");
 	test_parse_string(all_nt, "\"\\'\"", "\'");
-	test_parse_string(all_nt, "\"\\\\\"", "\\");
+	test_parse_string(all_nt, "\"abc\" /* */ \"def\"", "abcdef");
 	test_parse_string(all_nt, "\"\\n\"", "\n");
 }
+
+/*
+	Int result
+	~~~~~~~~~~
+	
+	For parsing an integer value a single function will used,
+	which will implement a co-routine for processing the
+	characters.
+*/
+
+typedef struct int_data
+{
+	ref_counted_base_t _base;
+	long long int value;
+	int state;
+	int sign;
+	text_pos_t ps;
+} *int_data_p;
+
+void int_data_print(void *data, ostream_p ostream)
+{
+	int_data_p int_data = (int_data_p)data;
+	char buffer[51];
+	snprintf(buffer, 50, "int %lld", int_data->sign * int_data->value);
+	buffer[50] = '\0';
+	ostream_puts(ostream, buffer);
+}
+
+void int_set_pos(result_p result, text_pos_p ps)
+{
+	if (result->data != NULL && ((int_data_p)result->data)->ps.cur_line == -1)
+		((int_data_p)result->data)->ps = *ps;
+}
+
+#define INT_DATA_WAIT_NEXT_CHAR(X)  int_data->state = X; return TRUE; L##X:
+
+bool int_data_add_char(result_p prev, char ch, result_p result)
+{
+	if (prev->data == NULL)
+	{
+		int_data_p int_data = MALLOC(struct int_data);
+		int_data->value = 0;
+		int_data->state = 0;
+		int_data->sign = 1;
+		int_data->_base.release = 0;
+		int_data->ps.cur_line = -1;
+		result_assign_ref_counted(result, int_data, int_data_print);
+	}
+	else
+		result_assign(result, prev);
+	int_data_p int_data = (int_data_p)result->data;
+	
+	switch (int_data->state)
+	{
+		case 0: goto L0;
+		case 1: goto L1;
+		case 2: goto L2;
+		case 3: goto L3;
+		case 4: goto L4;
+		case 5: goto L5;
+		case 6: goto L6;
+	}
+	L0:
+	
+	if (ch == '-')
+	{
+		int_data->sign = -1;
+		INT_DATA_WAIT_NEXT_CHAR(1)
+	}
+	if (ch == '0')
+	{
+		INT_DATA_WAIT_NEXT_CHAR(2)
+		if (ch == 'x')
+		{
+			// Process hexa decimal number
+			INT_DATA_WAIT_NEXT_CHAR(3)
+			for (;;)
+			{
+				if ('0' <= ch && ch <= '9')
+					int_data->value = 16 * int_data->value + ch - '0';
+				else if ('A' <= ch && ch <= 'F')
+					int_data->value = 16 * int_data->value + ch + (10 - 'A');
+				else if ('a' <= ch && ch <= 'f')
+					int_data->value = 16 * int_data->value + ch + (10 - 'a');
+				else
+					break;
+				INT_DATA_WAIT_NEXT_CHAR(4)
+			}
+		}
+		else
+		{
+			// Process octal number
+			while ('0' <= ch && ch <= '7')
+			{
+				int_data->value = 8 * int_data->value +  ch - '0';
+				INT_DATA_WAIT_NEXT_CHAR(5)
+			}
+		}
+	}
+	else
+	{
+		// Process decimal number
+		while ('0' <= ch && ch <= '9')
+		{
+			int_data->value = 10 * int_data->value + ch - '0';
+			INT_DATA_WAIT_NEXT_CHAR(6)
+		}
+	}
+	return FALSE;
+}
+
+/*	Int tree node structure */
+
+typedef struct int_node_t *int_node_p;
+struct int_node_t
+{
+	tree_node_t _node;
+	long long int value;
+};
+
+const char *int_node_type = "int";
+
+void int_node_print(void *data, ostream_p ostream)
+{
+	int_node_p int_node = (int_node_p)data;
+	char buffer[51];
+	snprintf(buffer, 50, "int %lld", int_node->value);
+	buffer[50] = '\0';
+	ostream_puts(ostream, buffer);
+}
+
+bool create_int_tree(const result_p rule_result, void* data, result_p result)
+{
+	int_data_p int_data = (int_data_p)rule_result->data;
+	
+	int_node_p int_node = MALLOC(struct int_node_t);
+	init_tree_node(&int_node->_node, int_node_type, NULL);
+	tree_node_set_pos(&int_node->_node, &int_data->ps);
+	int_node->value = int_data->sign * int_data->value;
+	result_assign_ref_counted(result, int_node, int_node_print);
+	return TRUE;
+}
+		
+/*	Int grammar */
+
+void int_grammar(non_terminal_dict_p *all_nt)
+{
+	HEADER(all_nt)
+	
+	NT_DEF("int")
+		RULE
+			CHARF('-', int_data_add_char) OPT(0) SET_PS(int_set_pos)
+			{ GROUPING
+				RULE // hexadecimal representaion
+					CHARF('0', int_data_add_char) SET_PS(int_set_pos) 
+					CHARF('x', int_data_add_char)
+					CHARSET(int_data_add_char) ADD_RANGE('0','9') ADD_RANGE('A','F') ADD_RANGE('a','f') SEQ(pass_to_sequence, use_sequence_result)
+				RULE // octal representation
+					CHARF('0', int_data_add_char) SET_PS(int_set_pos) 
+					CHARSET(int_data_add_char) ADD_RANGE('0','7') SEQ(pass_to_sequence, use_sequence_result) OPT(0)
+				RULE // decimal representation
+					CHARSET(int_data_add_char) ADD_RANGE('1','9') SET_PS(int_set_pos) 
+					CHARSET(int_data_add_char) ADD_RANGE('0','9') SEQ(pass_to_sequence, use_sequence_result) OPT(0)
+ 			}
+			CHAR('L') OPT(0)
+			END_FUNCTION(create_int_tree)
+}
+
+void test_parse_int(non_terminal_dict_p *all_nt, const char *input, long long int value)
+{
+	text_buffer_t text_buffer;
+	text_buffer_assign_string(&text_buffer, input);
+	
+	solutions_t solutions;
+	solutions_init(&solutions, &text_buffer);
+	
+	parser_t parser;
+	parser_init(&parser, &text_buffer);
+	parser.cache_hit_function = solutions_find;
+	parser.cache = &solutions;
+	
+	DECL_RESULT(result);
+	if (parse_nt(&parser, find_nt("int", all_nt), &result) && text_buffer_end(&text_buffer))
+	{
+		if (result.data == NULL)
+			fprintf(stderr, "ERROR: parsing '%s' did not return result\n", input);
+		else
+		{
+			tree_node_p tree_node = (tree_node_p)result.data;
+			if (tree_node->line != 1 && tree_node->column != 1)
+				fprintf(stderr, "WARNING: tree node position %d:%d is not 1:1\n", tree_node->line, tree_node->column);
+			if (tree_node->type_name != int_node_type)
+				fprintf(stderr, "ERROR: tree node is not of type int_node_type\n");
+			else
+			{
+				int_node_p int_node = (int_node_p)tree_node;
+				if (int_node->value != value)
+					fprintf(stderr, "ERROR: parsed value %lld from '%s' instead of expected %lld\n",
+					int_node->value, input, value);
+				else
+					fprintf(stderr, "OK: parsed integer %lld from \"%s\"\n", int_node->value, input);
+			}
+		}
+	}
+	else
+	{
+		fprintf(stderr, "ERROR: failed to parse int from '%s'\n", input);
+	}
+	DISP_RESULT(result);
+	
+	solutions_free(&solutions);
+}
+
+void test_int_grammar(non_terminal_dict_p *all_nt)
+{
+	test_parse_int(all_nt, "0", 0);
+	test_parse_int(all_nt, "1", 1);
+	test_parse_int(all_nt, "-1", -1);
+	test_parse_int(all_nt, "077", 077);
+	test_parse_int(all_nt, "0xAbc", 0xAbc);
+	test_parse_int(all_nt, "1234L", 1234);
+	test_parse_int(all_nt, "-23", -23);
+	test_parse_int(all_nt, "46464664", 46464664);
+}
+
 
 
 
@@ -3006,6 +3232,9 @@ int main(int argc, char *argv[])
 	
 	string_grammar(&all_nt);
 	test_string_grammar(&all_nt);
+	
+	int_grammar(&all_nt);
+	test_int_grammar(&all_nt);
 	
 	non_terminal_dict_p all_nt_c_grammar = NULL;
 	c_grammar(&all_nt_c_grammar);
