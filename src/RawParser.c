@@ -48,6 +48,7 @@ GNU General Public License:
 */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <malloc.h>
 #include <string.h>
 
@@ -66,13 +67,14 @@ typedef unsigned char byte;
 void *my_malloc(size_t size, unsigned int line)
 {
 	void *p = malloc(size);
-	fprintf(stdout, "At line %lu: allocated %lu bytes %p\n", line, size, p);
+	fprintf(stdout, "At line %u: allocated %lu bytes %p\n", line, size, p);
 	return p;
 }
 
 void my_free(void *p, unsigned int line)
 {
-	fprintf(stdout, "At line %lu: freed %p\n", line, p);
+
+	fprintf(stdout, "At line %u: freed %p\n", line, p);
 	free(p);
 }
 
@@ -637,18 +639,44 @@ struct result
 	void (*inc)(void *data);
 	void (*dec)(void *data);
 	void (*print)(void *data, ostream_p ostream);
+#ifdef CHECK_LOCAL_RESULT
+	int line;
+	const char *name;
+	result_p context;
+#endif
 };
 
 /*
 	- Function to initialize a result
 */
 
-void result_init(result_p result)
+#ifdef CHECK_LOCAL_RESULT
+#define CHECK_LOCAL_PARAM(P) , P
+#define RESULT_INIT(V) result_init(V, 0, __LINE__, "*")
+#define RESULT_RELEASE(V) result_release(V, 0, __LINE__)
+#else
+#define CHECK_LOCAL_PARAM(P)
+#define RESULT_INIT(V) result_init(V)
+#define RESULT_RELEASE(V) result_release(V)
+#endif
+
+void result_init(result_p result CHECK_LOCAL_PARAM(result_p *context) CHECK_LOCAL_PARAM(int line) CHECK_LOCAL_PARAM(const char *name))
 {
 	result->data = NULL;
 	result->inc = 0;
 	result->dec = 0;
 	result->print = 0;
+#ifdef CHECK_LOCAL_RESULT
+	result->line = line;
+	result->name = name;
+	if (context != NULL)
+	{
+		result->context = *context;
+		*context = result;
+	}
+	else
+		result->context = 0;
+#endif
 }
 
 /*
@@ -657,12 +685,16 @@ void result_init(result_p result)
 
 void result_assign(result_p trg, result_p src)
 {
-	result_t old_trg = *trg;
-	if (src->inc != 0)
+	void (*old_trg_dec)(void *data) = trg->dec;
+	void *old_trg_data = trg->data;
+	if (src->inc != 0 && src->data != 0)
 		src->inc(src->data);
-	*trg = *src;
-	if (old_trg.dec != 0)
-		old_trg.dec(old_trg.data);
+	trg->data = src->data;
+	trg->inc = src->inc;
+	trg->dec = src->dec;
+	trg->print = src->print;
+	if (old_trg_dec != 0)
+		old_trg_dec(old_trg_data);
 }
 
 /*
@@ -672,22 +704,47 @@ void result_assign(result_p trg, result_p src)
 
 void result_transfer(result_p trg, result_p src)
 {
-	result_t old_trg = *trg;
-	*trg = *src;
-	result_init(src);
-	if (old_trg.dec != 0)
-		old_trg.dec(old_trg.data);
+	void (*old_trg_dec)(void *data) = trg->dec;
+	void *old_trg_data = trg->data;
+	trg->data = src->data;
+	trg->inc = src->inc;
+	trg->dec = src->dec;
+	trg->print = src->print;
+	RESULT_INIT(src);
+	if (old_trg_dec != 0)
+		old_trg_dec(old_trg_data);
 }
 
 /*
 	- Function to release the result
 */
 
-void result_release(result_p result)
+void result_release(result_p result CHECK_LOCAL_PARAM(result_p *context) CHECK_LOCAL_PARAM(int line))
 {
-	if (result->dec != 0)
+#ifdef CHECK_LOCAL_RESULT
+	if (context != NULL)
+	{
+		if (*context == NULL)
+		{
+			printf("Context already empty on line %d. Found from line %d.\n", line, result->line);
+			exit(1);
+		}
+		if (*context != result)
+		{
+			printf("Wrong context on line %d. Found from line %d. Expect from line %s  (on %d)\n",
+				line, result->line, (*context)->name, (*context)->line);
+			exit(1);
+		}
+		*context = result->context;
+	}
+#endif
+	if (result->dec != 0 && result->data != 0)
 		result->dec(result->data);
 	result->data = NULL;
+	result->inc = 0;
+	result->dec = 0;
+	result->data = NULL;
+	result->print = 0;
 }
 
 /*
@@ -696,7 +753,7 @@ void result_release(result_p result)
 
 void result_print(result_p result, ostream_p ostream)
 {
-	if (result->print == NULL)
+	if (result->print == 0 || result->data == NULL)
 		ostream_puts(ostream, "<>");
 	else
 		result->print(result->data, ostream);
@@ -708,9 +765,18 @@ void result_print(result_p result, ostream_p ostream)
 	  the scope of a result variable
 */
 
+#ifdef CHECK_LOCAL_RESULT
+#define ENTER_RESULT_CONTEXT result_p result_p_context = 0;
+#define EXIT_RESULT_CONTEXT if (result_p_context != 0) { printf("On line %d context not closed for %s (on %d)\n", __LINE__, result_p_context->name, result_p_context->line); exit(1); }
+#define DECL_RESULT(V) result_t V; result_init(&V, &result_p_context, __LINE__, #V);
+#define DISP_RESULT(V) result_release(&V, &result_p_context, __LINE__);
+#else
+#define ENTER_RESULT_CONTEXT
+#define INIT_RESULT(V) result_init(&V)
+#define EXIT_RESULT_CONTEXT
 #define DECL_RESULT(V) result_t V; result_init(&V);
 #define DISP_RESULT(V) result_release(&V);
-
+#endif
 
 /*
 	- Function for using result of a sequence
@@ -745,6 +811,9 @@ typedef struct
 	   data contains pointers to other pieces of data for which
 	   reference counts need to be decremented.
 	*/
+#ifdef SAFE_CASTING
+	const char* type_name;
+#endif
 	void (*release)(void *);
 } ref_counted_base_t, *ref_counted_base_p;
 
@@ -761,10 +830,34 @@ void ref_counted_base_dec(void *data)
 	}
 }
 
+#ifdef SAFE_CASTING
+#define SET_TYPE(T, X) ((ref_counted_base_p)X)->type_name = T;
+#define CAST(T,X) ((T)check_type(#T,X,__LINE__))
+
+void *check_type(const char *type_name, void *value, int line)
+{
+	if (value == 0) return NULL;
+	const char *value_type_name = ((ref_counted_base_p)value)->type_name;
+	if (strcmp(value_type_name, type_name) != 0)
+	{
+		printf("line %d Error: castring %s to %s\n", line, ((ref_counted_base_p)value)->type_name, type_name); fflush(stdout);
+		exit(1);
+		return NULL;
+	}
+	return value;
+}
+#else
+#define SET_TYPE(T, X)
+#define CAST(T,X) ((T)(X))
+#endif
+
 void result_assign_ref_counted(result_p result, void *data, void (*print)(void *data, ostream_p ostream))
 {
 	if (debug_allocations) fprintf(stdout, "Allocated %p\n", data);
 	((ref_counted_base_p)data)->cnt = 1;
+#ifdef SAFE_CASTING
+	((ref_counted_base_p)data)->type_name = "";
+#endif
 	result->data = data;
 	result->inc = ref_counted_base_inc;
 	result->dec = ref_counted_base_dec;
@@ -785,12 +878,12 @@ typedef struct number_data
 	long num;
 } *number_data_p;
 
-#define NUMBER_DATA_NUM(R) (((number_data_p)(R)->data)->num)
+#define NUMBER_DATA_NUM(R) (CAST(number_data_p,(R)->data)->num)
 
 void number_print(void *data, ostream_p ostream)
 {
 	char buffer[41];
-	snprintf(buffer, 40, "number %ld", ((number_data_p)data)->num);
+	snprintf(buffer, 40, "number %ld", CAST(number_data_p, data)->num);
 	ostream_puts(ostream, buffer);
 }
 
@@ -799,6 +892,7 @@ void new_number_data(result_p result)
 	number_data_p number_data = MALLOC(struct number_data);
 	number_data->_base.release = 0;
 	result_assign_ref_counted(result, number_data, number_print);
+	SET_TYPE("number_data_p",number_data);
 }
 
 
@@ -951,6 +1045,8 @@ ostream_p stdout_stream;
 
 #define DEBUG_ENTER(X) if (debug_parse) { DEBUG_TAB; printf("Enter: %s", X); depth += 2; }
 #define DEBUG_ENTER_P1(X,A) if (debug_parse) { DEBUG_TAB; printf("Enter: "); printf(X,A); depth += 2; }
+#define DEBUG_ENTER_P2(X,A,B) if (debug_parse) { DEBUG_TAB; printf("Enter: "); printf(X,A,B); depth += 2; }
+#define DEBUG_ENTER_P3(X,A,B,C) if (debug_parse) { DEBUG_TAB; printf("Enter: "); printf(X,A,B,C); depth += 2; }
 #define DEBUG_EXIT(X) if (debug_parse) { depth -=2; DEBUG_TAB; printf("Leave: %s", X); }
 #define DEBUG_EXIT_P1(X,A) if (debug_parse) { depth -=2; DEBUG_TAB; printf("Leave: "); printf(X,A); }
 #define DEBUG_TAB if (debug_parse) printf("%*.*s", depth, depth, "")
@@ -967,11 +1063,12 @@ ostream_p stdout_stream;
 	~~~~~~~~~~~~~~~~~~~~~~~~
 */
 
+typedef struct nt_stack *nt_stack_p;
 
 typedef struct
 {
 	text_buffer_p text_buffer;
-	const char *current_nt;
+	nt_stack_p nt_stack;
 	cache_item_p (*cache_hit_function)(void *cache, size_t pos, const char *nt);
 	void *cache;
 } parser_t, *parser_p;
@@ -979,10 +1076,13 @@ typedef struct
 void parser_init(parser_p parser, text_buffer_p text_buffer)
 {
 	parser->text_buffer = text_buffer;
-	parser->current_nt = NULL;
+	parser->nt_stack = NULL;
 	parser->cache_hit_function = 0;
 	parser->cache = NULL;
 }
+
+nt_stack_p nt_stack_push(const char *name, parser_p parser);
+nt_stack_p nt_stack_pop(nt_stack_p cur);
 
 /*
 	Parsing functions
@@ -998,9 +1098,10 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 
 bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 {
+	ENTER_RESULT_CONTEXT
 	const char *nt = non_term->name;
 
-	DEBUG_ENTER_P1("parse_nt(%s)", nt); DEBUG_NL;
+	DEBUG_ENTER_P3("parse_nt(%s) at %d.%d", nt, parser->text_buffer->pos.cur_line, parser->text_buffer->pos.cur_column); DEBUG_NL;
 
 	/* First try the cache (if available) */
 	cache_item_p cache_item = NULL;
@@ -1011,23 +1112,24 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 		{
 			if (cache_item->success == s_success)
 			{
-				DEBUG_EXIT_P1("parse_nt(%s) SUCCESS = ", nt);  DEBUG_PT(&cache_item->result)  DEBUG_NL;
+				DEBUG_EXIT_P1("parse_nt(%s) CACHE SUCCESS = ", nt);  DEBUG_PT(&cache_item->result)  DEBUG_NL;
 				result_assign(result, &cache_item->result);
 				text_buffer_set_pos(parser->text_buffer, &cache_item->next_pos);
+				EXIT_RESULT_CONTEXT
 				return TRUE;
 			}
 			else if (cache_item->success == s_fail)
 			{
-				DEBUG_EXIT_P1("parse_nt(%s) FAIL", nt);  DEBUG_NL;
+				DEBUG_EXIT_P1("parse_nt(%s) CACHE FAIL", nt);  DEBUG_NL;
+				EXIT_RESULT_CONTEXT
 				return FALSE;
 			}
 			cache_item->success = s_fail; // To deal with indirect left-recurssion
 		}
 	}
 	
-	/* Set current non-terminal on parser */
-	const char *surr_nt = parser->current_nt;
-	parser->current_nt = nt;
+	/* Push the current non-terminal on stack */
+	parser->nt_stack = nt_stack_push(nt, parser);
 
 	if (debug_nt)
 	{   printf("%*.*s", depth, depth, "");
@@ -1043,8 +1145,10 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 		if (parse_rule(parser, rule->elements, &start, rule, result))
 		{
 			parsed_a_rule = TRUE;
+			DISP_RESULT(start)
 			break;
 		}
+		DISP_RESULT(start)
 	}
 	
 	if (!parsed_a_rule)
@@ -1057,9 +1161,10 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 			printf("Failed: %s\n", nt);
 		}
 		
-		/* Restore current non-terminal to its previous value */
-		parser->current_nt = surr_nt;
+		/* Pop the current non-terminal from the stack */
+		parser->nt_stack = nt_stack_pop(parser->nt_stack);
 		
+		EXIT_RESULT_CONTEXT
 		return FALSE;
 	}
 	
@@ -1100,9 +1205,6 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 		printf("Parsed: %s\n", nt);
 	}
 	
-	/* Restore current non-terminal to its previous value */
-	parser->current_nt = surr_nt;
-	
 	/* Update the cache item, if available */
 	if (cache_item != NULL)
 	{
@@ -1110,6 +1212,11 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 		cache_item->success = s_success;
 		cache_item->next_pos = parser->text_buffer->pos;
 	}
+
+	/* Pop the current non-terminal from the stack */
+	parser->nt_stack = nt_stack_pop(parser->nt_stack);
+	
+	EXIT_RESULT_CONTEXT
 	return TRUE;
 }
 
@@ -1130,7 +1237,8 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 
 bool parse_rule(parser_p parser, element_p element, const result_p prev_result, rules_p rule, result_p rule_result)
 {
-	DEBUG_ENTER("parse_rule: ");
+	ENTER_RESULT_CONTEXT
+	DEBUG_ENTER_P2("parse_rule at %d.%d: ", parser->text_buffer->pos.cur_line, parser->text_buffer->pos.cur_column);
 	DEBUG_PR(element); DEBUG_NL;
 
 	if (element == NULL)
@@ -1145,6 +1253,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 		}
 		DEBUG_EXIT("parse_rule = ");
 		DEBUG_PT(rule_result); DEBUG_NL;
+		EXIT_RESULT_CONTEXT
 		return TRUE;
 	}
 
@@ -1164,6 +1273,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 			{
 				DISP_RESULT(skip_result);
 	            DEBUG_EXIT("parse_rule failed due to add skip function"); DEBUG_NL;
+				EXIT_RESULT_CONTEXT
 				return FALSE;
 			}
 		}
@@ -1175,6 +1285,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 				DISP_RESULT(empty);
 				DISP_RESULT(skip_result);
 	            DEBUG_EXIT("parse_rule failed due to add function"); DEBUG_NL;
+				EXIT_RESULT_CONTEXT
 				return FALSE;
 			}
 			DISP_RESULT(empty);
@@ -1187,6 +1298,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 			DISP_RESULT(skip_result);
             DEBUG_EXIT("parse_rule = ");
             DEBUG_PT(rule_result); DEBUG_NL;
+			EXIT_RESULT_CONTEXT
 			return TRUE;
 		}
 		DISP_RESULT(skip_result);
@@ -1195,7 +1307,6 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 	/* Store the current position */
 	text_pos_t sp = parser->text_buffer->pos;
 	
-	DECL_RESULT(part_result);
 	if (element->sequence)
 	{
 		/* The first element of the fule is a sequence. */
@@ -1216,13 +1327,12 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 					DISP_RESULT(seq_begin);
 					DEBUG_EXIT("parse_rule = ");
 					DEBUG_PT(rule_result); DEBUG_NL;
+					EXIT_RESULT_CONTEXT
 					return TRUE;
 				}
 			}
 			else
 			{
-				DISP_RESULT(seq_begin);
-				
 				/* Now continue parsing more elements */
 				for (;;)
 				{
@@ -1231,14 +1341,17 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 						DECL_RESULT(result);
 						if (element->add_seq_function != NULL && !element->add_seq_function(prev_result, &seq_elem, &result))
 						{
-							DISP_RESULT(result);
-							DISP_RESULT(seq_elem);
-							return FALSE;
+							DEBUG_TAB; DEBUG_("add_seq_function failed\n");
+							break;
 						}
 						if (parse_rule(parser, element->next, &result, rule, rule_result))
 						{
 							DISP_RESULT(result);
 							DISP_RESULT(seq_elem);
+							DISP_RESULT(seq_begin);
+							DEBUG_EXIT("parse_rule = ");
+							DEBUG_PT(rule_result); DEBUG_NL;
+							EXIT_RESULT_CONTEXT
 							return TRUE;
 						}
 						DISP_RESULT(result);
@@ -1252,8 +1365,8 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 						DECL_RESULT(dummy_prev_result);
 						DECL_RESULT(dummy_chain_elem);
 						bool parsed_chain = parse_rule(parser, element->chain_rule, &dummy_prev_result, NULL, &dummy_chain_elem);
-						DISP_RESULT(dummy_prev_result);
 						DISP_RESULT(dummy_chain_elem);
+						DISP_RESULT(dummy_prev_result);
 						if (!parsed_chain)
 							break;
 					}
@@ -1276,23 +1389,26 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 				DECL_RESULT(result);
 				if (element->add_seq_function != NULL && !element->add_seq_function(prev_result, &seq_elem, &result))
 				{
-					DISP_RESULT(seq_elem);
-					DISP_RESULT(result);
-					return FALSE;
+					DEBUG_TAB; DEBUG_("add_seq_function failed\n");
 				}
-				DISP_RESULT(seq_elem);
-				if (parse_rule(parser, element->next, &result, rule, rule_result))
+				else
 				{
-					DISP_RESULT(result);
-					DEBUG_EXIT("parse_rule = ");
-					DEBUG_PT(rule_result); DEBUG_NL;
-					return TRUE;
+					if (parse_rule(parser, element->next, &result, rule, rule_result))
+					{
+						DISP_RESULT(result);
+						DISP_RESULT(seq_elem);
+						DISP_RESULT(seq_begin);
+						DEBUG_EXIT("parse_rule = ");
+						DEBUG_PT(rule_result); DEBUG_NL;
+						EXIT_RESULT_CONTEXT
+						return TRUE;
+					}
 				}
 				DISP_RESULT(result);
 			}
 		}
-		DISP_RESULT(seq_begin);
 		DISP_RESULT(seq_elem);
+		DISP_RESULT(seq_begin);
 	}
 	else
 	{
@@ -1305,6 +1421,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 				DISP_RESULT(elem);
 				DEBUG_EXIT("parse_rule = ");
 				DEBUG_PT(rule_result); DEBUG_NL;
+				EXIT_RESULT_CONTEXT
 				return TRUE;
 			}
 		}
@@ -1325,6 +1442,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 			{
 				DISP_RESULT(skip_result);
 	            DEBUG_EXIT("parse_rule failed due to add skip function"); DEBUG_NL;
+				EXIT_RESULT_CONTEXT
 				return FALSE;
 			}
 		}
@@ -1336,6 +1454,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 				DISP_RESULT(empty);
 				DISP_RESULT(skip_result);
 	            DEBUG_EXIT("parse_rule failed due to add function"); DEBUG_NL;
+				EXIT_RESULT_CONTEXT
 				return FALSE;
 			}
 			DISP_RESULT(empty);
@@ -1348,17 +1467,20 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 			DISP_RESULT(skip_result);
             DEBUG_EXIT("parse_rule = ");
             DEBUG_PT(rule_result); DEBUG_NL;
+			EXIT_RESULT_CONTEXT
 			return TRUE;
 		}
 		DISP_RESULT(skip_result);
 	}
 
     DEBUG_EXIT("parse_rule: failed"); DEBUG_NL;
+	EXIT_RESULT_CONTEXT
 	return FALSE;
 }
 
 bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, rules_p rule, result_p rule_result)
 {
+	ENTER_RESULT_CONTEXT
 	/* In case of the avoid modifier, first an attempt is made to parse the
 	   remained of the rule */
 	if (element->avoid)
@@ -1367,11 +1489,13 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 		if (element->add_seq_function != NULL && !element->add_seq_function(prev, prev_seq, &result))
 		{
 			DISP_RESULT(result);
+			EXIT_RESULT_CONTEXT
 			return FALSE;
 		}
 		if (parse_rule(parser, element->next, &result, rule, rule_result))
 		{
 			DISP_RESULT(result);
+			EXIT_RESULT_CONTEXT
 			return TRUE;
 		}
 		DISP_RESULT(result);
@@ -1400,6 +1524,7 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 			if (parse_seq(parser, element, &seq_elem, prev, rule, rule_result))
 			{
 				DISP_RESULT(seq_elem);
+				EXIT_RESULT_CONTEXT
 				return TRUE;
 			}
 		}
@@ -1418,17 +1543,20 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 		if (element->add_seq_function != NULL && !element->add_seq_function(prev, prev_seq, &result))
 		{
 			DISP_RESULT(result);
+			EXIT_RESULT_CONTEXT
 			return FALSE;
 		}
 		
 		if (parse_rule(parser, element->next, &result, rule, rule_result))
 		{
 			DISP_RESULT(result);
+			EXIT_RESULT_CONTEXT
 			return TRUE;
 		}
 		DISP_RESULT(result);
 	}
 	
+	EXIT_RESULT_CONTEXT
 	return FALSE;
 }
 
@@ -1441,8 +1569,11 @@ bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, cons
 	with if the element is optional or a sequence.
 */
 
+void expect_element(parser_p parser, element_p element);
+
 bool parse_element(parser_p parser, element_p element, const result_p prev_result, result_p result)
 {
+	ENTER_RESULT_CONTEXT
 	/* Store the current position */
 	text_pos_t sp = parser->text_buffer->pos;
 
@@ -1455,6 +1586,7 @@ bool parse_element(parser_p parser, element_p element, const result_p prev_resul
 				if (!parse_nt(parser, element->info.non_terminal, &nt_result))
 				{
 					DISP_RESULT(nt_result)
+					EXIT_RESULT_CONTEXT
 					return FALSE;
 				}
 				
@@ -1463,6 +1595,7 @@ bool parse_element(parser_p parser, element_p element, const result_p prev_resul
 				{
 					DISP_RESULT(nt_result)
 					text_buffer_set_pos(parser->text_buffer, &sp);
+					EXIT_RESULT_CONTEXT
 					return FALSE;
 				}
 				
@@ -1473,6 +1606,7 @@ bool parse_element(parser_p parser, element_p element, const result_p prev_resul
 				{
 					DISP_RESULT(nt_result)
 					text_buffer_set_pos(parser->text_buffer, &sp);
+					EXIT_RESULT_CONTEXT
 					return FALSE;
 				}
 				DISP_RESULT(nt_result)
@@ -1498,6 +1632,7 @@ bool parse_element(parser_p parser, element_p element, const result_p prev_resul
 				{
 					/* Non of the rules worked */
 					DISP_RESULT(rule_result)
+					EXIT_RESULT_CONTEXT
 					return FALSE;
 				}
 				
@@ -1508,6 +1643,7 @@ bool parse_element(parser_p parser, element_p element, const result_p prev_resul
 				{
 					DISP_RESULT(rule_result)
 					text_buffer_set_pos(parser->text_buffer, &sp);
+					EXIT_RESULT_CONTEXT
 					return FALSE;
 				}
 				DISP_RESULT(rule_result)
@@ -1516,25 +1652,40 @@ bool parse_element(parser_p parser, element_p element, const result_p prev_resul
 		case rk_end:
 			/* Check if the end of the buffer is reached */
 			if (!text_buffer_end(parser->text_buffer))
+			{
+				expect_element(parser, element);
+				EXIT_RESULT_CONTEXT
 				return FALSE;
+			}
 			result_assign(result, prev_result);
 			break;
 		case rk_char:
 			/* Check if the specified character is found at the current position in the text buffer */
 			if (*parser->text_buffer->info != element->info.ch)
+			{
+				expect_element(parser, element);
+				EXIT_RESULT_CONTEXT
 				return FALSE;
+			}
 			/* Advance the current position of the text buffer */
 			text_buffer_next(parser->text_buffer);
 			/* Process the character */
 			if (element->add_char_function == 0)
 				result_assign(result, prev_result);
 			else if (!(*element->add_char_function)(prev_result, element->info.ch, result))
+			{
+				EXIT_RESULT_CONTEXT
 				return FALSE;
+			}
 			break;
 		case rk_charset:
 			/* Check if the character at the current position in the text buffer is found in the character set */
 			if (!char_set_contains(element->info.char_set, *parser->text_buffer->info))
+			{
+				expect_element(parser, element);
+				EXIT_RESULT_CONTEXT
 				return FALSE;
+			}
 			{
 				/* Remember the character and advance the current position of the text buffer */
 				char ch = *parser->text_buffer->info;
@@ -1543,7 +1694,10 @@ bool parse_element(parser_p parser, element_p element, const result_p prev_resul
 				if (element->add_char_function == 0)
 					result_assign(result, prev_result);
 				else if (!(*element->add_char_function)(prev_result, ch, result))
+				{
+					EXIT_RESULT_CONTEXT
 					return FALSE;
+				}
 			}
 			break;
 		case rk_term:
@@ -1552,13 +1706,18 @@ bool parse_element(parser_p parser, element_p element, const result_p prev_resul
 				const char *next_pos = element->info.terminal_function(parser->text_buffer->info, result);
 				/* If the start position is returned, assume that it failed. */
 				if (next_pos <= parser->text_buffer->info)
+				{
+					expect_element(parser, element);
+					EXIT_RESULT_CONTEXT
 					return FALSE;
+				}
 				/* Increment the buffer till the returned position */
 				while (parser->text_buffer->info < next_pos)
 					text_buffer_next(parser->text_buffer);
 			}
 			break;
 		default:
+			EXIT_RESULT_CONTEXT
 			return FALSE;
 			break;
 	}
@@ -1567,6 +1726,7 @@ bool parse_element(parser_p parser, element_p element, const result_p prev_resul
 	if (element->set_pos != NULL)
 		element->set_pos(result, &sp);
 
+	EXIT_RESULT_CONTEXT
 	return TRUE;
 }
 
@@ -1636,7 +1796,7 @@ cache_item_p solutions_find(void *cache, size_t pos, const char *nt)
 	sol->next = solutions->sols[pos];
 	sol->nt = nt;
 	sol->cache_item.success = s_unknown;
-	result_init(&sol->cache_item.result);
+	RESULT_INIT(&sol->cache_item.result);
 	solutions->sols[pos] = sol;
 	return &sol->cache_item;
 }
@@ -1648,6 +1808,8 @@ cache_item_p solutions_find(void *cache, size_t pos, const char *nt)
 
 void test_parse_white_space(non_terminal_dict_p *all_nt, const char *input)
 {
+	ENTER_RESULT_CONTEXT
+
 	text_buffer_t text_buffer;
 	text_buffer_assign_string(&text_buffer, input);
 	
@@ -1671,6 +1833,8 @@ void test_parse_white_space(non_terminal_dict_p *all_nt, const char *input)
 	DISP_RESULT(result);
 
 	solutions_free(&solutions);
+
+	EXIT_RESULT_CONTEXT
 }
 
 void test_white_space_grammar(non_terminal_dict_p *all_nt)
@@ -1686,6 +1850,7 @@ void test_white_space_grammar(non_terminal_dict_p *all_nt)
 
 void test_parse_number(non_terminal_dict_p *all_nt, const char *input, int num)
 {
+	ENTER_RESULT_CONTEXT
 	text_buffer_t text_buffer;
 	text_buffer_assign_string(&text_buffer, input);
 	
@@ -1702,17 +1867,18 @@ void test_parse_number(non_terminal_dict_p *all_nt, const char *input, int num)
 	{
 		if (result.data == NULL)
 			fprintf(stderr, "ERROR: parsing '%s' did not return result\n", input);
-		else if (((number_data_p)result.data)->num != num)
+		else if (CAST(number_data_p, result.data)->num != num)
 			fprintf(stderr, "ERROR: parsed value %ld from '%s' instead of expected %d\n",
-				((number_data_p)result.data)->num, input, num);
+				CAST(number_data_p, result.data)->num, input, num);
 		else
-			fprintf(stderr, "OK: parsed value %ld from '%s'\n", ((number_data_p)result.data)->num, input);
+			fprintf(stderr, "OK: parsed value %ld from '%s'\n", CAST(number_data_p, result.data)->num, input);
 	}
 	else
 		fprintf(stderr, "ERROR: failed to parse number from '%s'\n", input);
 	DISP_RESULT(result);
 
 	solutions_free(&solutions);
+	EXIT_RESULT_CONTEXT
 }
 
 void test_number_grammar(non_terminal_dict_p *all_nt)
@@ -1764,15 +1930,15 @@ long alloced_trees = 0L;
 
 void release_tree(void *data)
 {
-	tree_p tree = (tree_p)data;;
+	tree_p tree = CAST(tree_p, data);
 
 	alloced_trees--;
 
 	if (tree->nr_children > 0)
 	{
 		for (int i = 0; i < tree->nr_children; i++)
-			result_release(&tree->children[i]);
-		free(tree->children);
+			RESULT_RELEASE(&tree->children[i]);
+		FREE(tree->children);
 	}
 	*(tree_p*)tree = old_trees;
 	old_trees = tree;
@@ -1810,8 +1976,10 @@ prev_child_p old_prev_child = NULL;
 
 void release_prev_child( void *data )
 {
-	prev_child_p prev_child = (prev_child_p)data;
-	result_release(&prev_child->child);
+	prev_child_p prev_child = CAST(prev_child_p, data);
+	RESULT_RELEASE(&prev_child->child);
+	if (prev_child != NULL)
+		ref_counted_base_dec(prev_child);
 	FREE(prev_child);
 }
 
@@ -1820,17 +1988,21 @@ prev_child_p malloc_prev_child()
 	prev_child_p new_prev_child = MALLOC(struct prev_child_t);
 	new_prev_child->_base.cnt = 1;
 	new_prev_child->_base.release = release_prev_child;
-	result_init(&new_prev_child->child);
+	RESULT_INIT(&new_prev_child->child);
 	new_prev_child->prev = NULL;
 	return new_prev_child;
 }
 
 bool add_child(result_p prev, result_p elem, result_p result)
 {
+	prev_child_p prev_child = CAST(prev_child_p, prev->data);
+	if (prev_child != NULL)
+		ref_counted_base_inc(prev_child);
 	prev_child_p new_prev_child = malloc_prev_child();
-	new_prev_child->prev = (prev_child_p)prev->data;
+	new_prev_child->prev = prev_child;
 	result_assign(&new_prev_child->child, elem);
 	result_assign_ref_counted(result, new_prev_child, NULL);
+	SET_TYPE("prev_child_p", new_prev_child);
 	return TRUE;
 }
 
@@ -1840,6 +2012,7 @@ bool rec_add_child(result_p rec_result, result_p result)
 	new_prev_child->prev = NULL;
 	result_assign(&new_prev_child->child, rec_result);
 	result_assign_ref_counted(result, new_prev_child, NULL);
+	SET_TYPE("prev_child_p", new_prev_child);
 	return TRUE;
 }
 
@@ -1861,7 +2034,7 @@ tree_p make_tree_with_children(const char* name, prev_child_p children)
 	for (child = children; child != NULL; child = child->prev)
 	{
 		i--;
-		result_init(&tree->children[i]);
+		RESULT_INIT(&tree->children[i]);
 		result_assign(&tree->children[i], &child->child);
 	}
 	return tree;
@@ -1869,7 +2042,7 @@ tree_p make_tree_with_children(const char* name, prev_child_p children)
 
 void tree_print(void *data, ostream_p ostream)
 {
-	tree_p tree = (tree_p)data;
+	tree_p tree = CAST(tree_p, data);
 	if (tree->_node.type_name != NULL)
 		ostream_puts(ostream, tree->_node.type_name);
 	ostream_put(ostream, '(');
@@ -1884,16 +2057,17 @@ void tree_print(void *data, ostream_p ostream)
 
 bool make_tree(const result_p rule_result, void* data, result_p result)
 {
-	prev_child_p children = (prev_child_p)rule_result->data;
+	prev_child_p children = CAST(prev_child_p, rule_result->data);
 	const char *name = (const char*)data;
 	tree_p tree = make_tree_with_children(name, children);
 	result_assign_ref_counted(result, tree, tree_print);
+	SET_TYPE("tree_p", tree);
 	return TRUE;
 }
 
 bool pass_tree(const result_p rule_result, void* data, result_p result)
 {
-	prev_child_p child = (prev_child_p)rule_result->data;
+	prev_child_p child = CAST(prev_child_p, rule_result->data);
 	result_transfer(result, &child->child);
 	return TRUE;
 }
@@ -2021,13 +2195,14 @@ bool ident_add_char(result_p prev, char ch, result_p result)
 		ident_data_p ident_data = MALLOC(struct ident_data);
 		ident_data->_base.release = NULL;
 		result_assign_ref_counted(result, ident_data, NULL);
+		SET_TYPE("ident_data_p", ident_data);
 		ident_data->ident[0] = ch;
 		ident_data->len = 1;
 	}
 	else
 	{
 		result_assign(result, prev);
-		ident_data_p ident_data = (ident_data_p)result->data;
+		ident_data_p ident_data = CAST(ident_data_p, result->data);
 		if (ident_data->len < 64)
 			ident_data->ident[ident_data->len++] = ch;
 	}
@@ -2037,7 +2212,7 @@ bool ident_add_char(result_p prev, char ch, result_p result)
 void ident_set_pos(result_p result, text_pos_p ps)
 {
 	if (result->data != 0)
-		((ident_data_p)result->data)->ps = *ps;
+		(CAST(ident_data_p, result->data))->ps = *ps;
 }
 
 void pass_to_sequence(result_p prev, result_p seq)
@@ -2052,17 +2227,18 @@ struct ident_t
 {
 	tree_node_t _node;
 	const char *name;
+	bool is_keyword;
 };
 
 void ident_print(void *data, ostream_p ostream)
 {
-	ostream_puts(ostream, ((ident_p)data)->name);
+	ostream_puts(ostream, CAST(ident_p, data)->name);
 }
 const char *ident_type = "ident";
 
 bool create_ident_tree(const result_p rule_result, void* data, result_p result)
 {
-	ident_data_p ident_data = (ident_data_p)rule_result->data;
+	ident_data_p ident_data = CAST(ident_data_p, rule_result->data);
 	if (ident_data == 0)
 	{
 		fprintf(stderr, "NULL\n");
@@ -2073,7 +2249,9 @@ bool create_ident_tree(const result_p rule_result, void* data, result_p result)
 	init_tree_node(&ident->_node, ident_type, NULL);
 	tree_node_set_pos(&ident->_node, &ident_data->ps);
 	ident->name = ident_string(ident_data->ident);
+	ident->is_keyword = *keyword_state == 1;
 	result_assign_ref_counted(result, ident, ident_print);
+	SET_TYPE("ident_p", ident);
 	return TRUE;
 }
 
@@ -2097,6 +2275,7 @@ void ident_grammar(non_terminal_dict_p *all_nt)
 
 void test_parse_ident(non_terminal_dict_p *all_nt, const char *input)
 {
+	ENTER_RESULT_CONTEXT
 	text_buffer_t text_buffer;
 	text_buffer_assign_string(&text_buffer, input);
 	
@@ -2122,7 +2301,7 @@ void test_parse_ident(non_terminal_dict_p *all_nt, const char *input)
 				fprintf(stderr, "ERROR: tree node is not of type ident_type\n");
 			else
 			{
-				ident_p ident = (ident_p)tree_node;
+				ident_p ident = CAST(ident_p, tree_node);
 				if (strcmp(ident->name, input) != 0)
 					fprintf(stderr, "ERROR: parsed value '%s' from '%s' instead of expected '%s'\n",
 					ident->name, input, input);
@@ -2138,6 +2317,7 @@ void test_parse_ident(non_terminal_dict_p *all_nt, const char *input)
 	DISP_RESULT(result);
 	
 	solutions_free(&solutions);
+	EXIT_RESULT_CONTEXT
 }
 
 void test_ident_grammar(non_terminal_dict_p *all_nt)
@@ -2177,7 +2357,7 @@ void print_single_char(char ch, ostream_p ostream)
 void char_data_print(void *data, ostream_p ostream)
 {
 	ostream_puts(ostream, "char '");
-	print_single_char(((char_data_p)data)->ch, ostream);
+	print_single_char(CAST(char_data_p, data)->ch, ostream);
 	ostream_puts(ostream, "'");
 }
 
@@ -2187,18 +2367,27 @@ void char_set_pos(result_p result, text_pos_p ps)
 	char_data->ps = *ps;
 	char_data->_base.release = 0;
 	result_assign_ref_counted(result, char_data, char_data_print);
+	SET_TYPE("char_data_p", char_data);
 }
 
 bool normal_char(result_p prev, char ch, result_p result)
 {
 	result_assign(result, prev);
-	((char_data_p)result->data)->ch = ch;
+	CAST(char_data_p, result->data)->ch = ch;
 	return TRUE;
 }
 
 bool escaped_char(result_p prev, char ch, result_p result)
 {
-	return normal_char(prev, ch == '0' ? '\0' : ch == 'n' ? '\n' : ch, result);
+	return normal_char(prev,
+		ch == '0' ? '\0' :
+		ch == 'a' ? '\a' :
+		ch == 'b' ? '\b' :
+		ch == 'f' ? '\f' :
+		ch == 'n' ? '\n' :
+		ch == 'r' ? '\r' :
+		ch == 't' ? '\t' :
+		ch == 'v' ? '\v' : ch, result);
 }
 
 /*	Char tree node structure */
@@ -2221,13 +2410,14 @@ void char_node_print(void *data, ostream_p ostream)
 
 bool create_char_tree(const result_p rule_result, void* data, result_p result)
 {
-	char_data_p char_data = (char_data_p)rule_result->data;
+	char_data_p char_data = CAST(char_data_p, rule_result->data);
 
 	char_node_p char_node = MALLOC(struct char_node_t);
 	init_tree_node(&char_node->_node, char_node_type, NULL);
 	tree_node_set_pos(&char_node->_node, &char_data->ps);
 	char_node->ch = char_data->ch;
 	result_assign_ref_counted(result, char_node, char_node_print);
+	SET_TYPE("char_data_p", char_data);
 	return TRUE;
 }
 
@@ -2242,7 +2432,7 @@ void char_grammar(non_terminal_dict_p *all_nt)
 			CHAR('\'') SET_PS(char_set_pos)
 			{ GROUPING
 				RULE // Escaped character
-					CHAR('\\') CHARSET(escaped_char) ADD_CHAR('0') ADD_CHAR('\'') ADD_CHAR('\\') ADD_CHAR('n')
+					CHAR('\\') CHARSET(escaped_char) ADD_CHAR('0') ADD_CHAR('\"') ADD_CHAR('\'') ADD_CHAR('\\') ADD_CHAR('a') ADD_CHAR('b') ADD_CHAR('f') ADD_CHAR('n') ADD_CHAR('r') ADD_CHAR('t') ADD_CHAR('v')
 				RULE // Normal character
 					CHARSET(normal_char) ADD_RANGE(' ', 126) REMOVE_CHAR('\\') REMOVE_CHAR('\'')
 			}
@@ -2257,6 +2447,7 @@ void char_grammar(non_terminal_dict_p *all_nt)
 
 void test_parse_char(non_terminal_dict_p *all_nt, const char *input, char ch)
 {
+	ENTER_RESULT_CONTEXT
 	text_buffer_t text_buffer;
 	text_buffer_assign_string(&text_buffer, input);
 	
@@ -2298,6 +2489,8 @@ void test_parse_char(non_terminal_dict_p *all_nt, const char *input, char ch)
 	DISP_RESULT(result);
 	
 	solutions_free(&solutions);
+
+	EXIT_RESULT_CONTEXT
 }
 
 void test_char_grammar(non_terminal_dict_p *all_nt)
@@ -2327,17 +2520,25 @@ struct string_buffer
 };
 string_buffer_p global_string_buffer = NULL;
 
+string_buffer_p new_string_buffer()
+{
+	string_buffer_p string_buffer = MALLOC(struct string_buffer);
+	string_buffer->next = NULL;
+	return string_buffer;
+}
+
 typedef struct string_data
 {
 	ref_counted_base_t _base;
 	string_buffer_p buffer;
 	size_t length;
+	char octal_char;
 	text_pos_t ps;
 } *string_data_p;
 
 void string_data_print(void *data, ostream_p ostream)
 {
-	string_data_p string_data = (string_data_p)data;
+	string_data_p string_data = CAST(string_data_p, data);
 	ostream_puts(ostream, "char \"");
 	string_buffer_p string_buffer = global_string_buffer;
 	int j = 0;
@@ -2365,24 +2566,25 @@ void string_set_pos(result_p result, text_pos_p ps)
 		string_data->length = 0;
 		string_data->_base.release = 0;
 		result_assign_ref_counted(result, string_data, string_data_print);
+		SET_TYPE("string_data_p", string_data);
 	}
 }
 
 bool string_data_add_normal_char(result_p prev, char ch, result_p result)
 {
 	result_assign(result, prev);
-	string_data_p string_data = (string_data_p)result->data;
+	string_data_p string_data = CAST(string_data_p, result->data);
 	int j = string_data->length % 100;
 	if (string_data->length == 0)
 	{
 		if (global_string_buffer == NULL)
-			global_string_buffer = MALLOC(struct string_buffer);
+			global_string_buffer = new_string_buffer();
 		string_data->buffer = global_string_buffer;
 	}
 	else if (j == 0)
 	{
 		if (string_data->buffer->next == NULL)
-			string_data->buffer->next = MALLOC(struct string_buffer);
+			string_data->buffer->next = new_string_buffer();
 		string_data->buffer = string_data->buffer->next;
 	}
 	string_data->buffer->buf[j++] = ch;
@@ -2392,7 +2594,29 @@ bool string_data_add_normal_char(result_p prev, char ch, result_p result)
 
 bool string_data_add_escaped_char(result_p prev, char ch, result_p result)
 {
-	return string_data_add_normal_char(prev, ch == '0' ? '\0' : ch == 'n' ? '\n' : ch, result);
+	return string_data_add_normal_char(prev, ch == '0' ? '\0' : ch == 'n' ? '\n' : ch == 'r' ? '\r' : ch, result);
+}
+
+bool string_data_add_first_octal(result_p prev, char ch, result_p result)
+{
+	result_assign(result, prev);
+	string_data_p string_data = CAST(string_data_p, result->data);
+	string_data->octal_char = (ch - '0') << 6;
+	return TRUE;
+}
+
+bool string_data_add_second_octal(result_p prev, char ch, result_p result)
+{
+	result_assign(result, prev);
+	string_data_p string_data = CAST(string_data_p, result->data);
+	string_data->octal_char |= (ch - '0') << 3;
+	return TRUE;
+}
+
+bool string_data_add_third_octal(result_p prev, char ch, result_p result)
+{
+	string_data_p string_data = CAST(string_data_p, prev->data);
+	return string_data_add_normal_char(prev, string_data->octal_char | (ch - '0'), result);
 }
 
 /*	String tree node structure */
@@ -2408,7 +2632,7 @@ const char *string_node_type = "string";
 
 void string_node_print(void *data, ostream_p ostream)
 {
-	string_node_p string_node = (string_node_p)data;
+	string_node_p string_node = CAST(string_node_p, data);
 	ostream_puts(ostream, "string \"");
 	for (const char *s = string_node->str; *s != '\0'; s++)
 		print_single_char(*s, ostream);
@@ -2417,7 +2641,7 @@ void string_node_print(void *data, ostream_p ostream)
 
 bool create_string_tree(const result_p rule_result, void* data, result_p result)
 {
-	string_data_p string_data = (string_data_p)rule_result->data;
+	string_data_p string_data = CAST(string_data_p, rule_result->data);
 	
 	string_node_p string_node = MALLOC(struct string_node_t);
 	init_tree_node(&string_node->_node, string_node_type, NULL);
@@ -2439,6 +2663,7 @@ bool create_string_tree(const result_p rule_result, void* data, result_p result)
 	}
 	*s = '\0';
 	result_assign_ref_counted(result, string_node, string_node_print);
+	SET_TYPE("string_node_p", string_node);
 	return TRUE;
 }
 		
@@ -2454,8 +2679,13 @@ void string_grammar(non_terminal_dict_p *all_nt)
 				RULE
 					CHAR('"') SET_PS(string_set_pos)
 					{ GROUPING
+						RULE // Octal character
+							CHAR('\\')
+							CHARSET(string_data_add_first_octal) ADD_CHAR('0') ADD_CHAR('1')
+							CHARSET(string_data_add_second_octal) ADD_RANGE('0','7')
+							CHARSET(string_data_add_third_octal) ADD_RANGE('0','7')
 						RULE // Escaped character
-							CHAR('\\') CHARSET(string_data_add_escaped_char) ADD_CHAR('0') ADD_CHAR('\'') ADD_CHAR('\\') ADD_CHAR('n')
+							CHAR('\\') CHARSET(string_data_add_escaped_char) ADD_CHAR('0') ADD_CHAR('\'') ADD_CHAR('"') ADD_CHAR('\\') ADD_CHAR('n') ADD_CHAR('r')
 						RULE // Normal character
 							CHARSET(string_data_add_normal_char) ADD_RANGE(' ', 126) REMOVE_CHAR('\\') REMOVE_CHAR('"')
 					} SEQ(pass_to_sequence, use_sequence_result) OPT(0)
@@ -2466,6 +2696,8 @@ void string_grammar(non_terminal_dict_p *all_nt)
 
 void test_parse_string(non_terminal_dict_p *all_nt, const char *input, const char *str)
 {
+	ENTER_RESULT_CONTEXT
+
 	text_buffer_t text_buffer;
 	text_buffer_assign_string(&text_buffer, input);
 	
@@ -2491,7 +2723,7 @@ void test_parse_string(non_terminal_dict_p *all_nt, const char *input, const cha
 				fprintf(stderr, "ERROR: tree node is not of type string_node_type\n");
 			else
 			{
-				string_node_p string_node = (string_node_p)tree_node;
+				string_node_p string_node = CAST(string_node_p, tree_node);
 				if (strcmp(string_node->str, str) != 0)
 					fprintf(stderr, "ERROR: parsed value '%s' from '%s' instead of expected '%s'\n",
 					string_node->str, input, str);
@@ -2507,6 +2739,8 @@ void test_parse_string(non_terminal_dict_p *all_nt, const char *input, const cha
 	DISP_RESULT(result);
 	
 	solutions_free(&solutions);
+
+	EXIT_RESULT_CONTEXT
 }
 
 void test_string_grammar(non_terminal_dict_p *all_nt)
@@ -2538,7 +2772,7 @@ typedef struct int_data
 
 void int_data_print(void *data, ostream_p ostream)
 {
-	int_data_p int_data = (int_data_p)data;
+	int_data_p int_data = CAST(int_data_p, data);
 	char buffer[51];
 	snprintf(buffer, 50, "int %lld", int_data->sign * int_data->value);
 	buffer[50] = '\0';
@@ -2547,8 +2781,8 @@ void int_data_print(void *data, ostream_p ostream)
 
 void int_set_pos(result_p result, text_pos_p ps)
 {
-	if (result->data != NULL && ((int_data_p)result->data)->ps.cur_line == -1)
-		((int_data_p)result->data)->ps = *ps;
+	if (result->data != NULL && CAST(int_data_p, result->data)->ps.cur_line == -1)
+		CAST(int_data_p, result->data)->ps = *ps;
 }
 
 #define INT_DATA_WAIT_NEXT_CHAR(X)  int_data->state = X; return TRUE; L##X:
@@ -2564,10 +2798,11 @@ bool int_data_add_char(result_p prev, char ch, result_p result)
 		int_data->_base.release = 0;
 		int_data->ps.cur_line = -1;
 		result_assign_ref_counted(result, int_data, int_data_print);
+		SET_TYPE("int_data_p", int_data);
 	}
 	else
 		result_assign(result, prev);
-	int_data_p int_data = (int_data_p)result->data;
+	int_data_p int_data = CAST(int_data_p, result->data);
 	
 	switch (int_data->state)
 	{
@@ -2650,13 +2885,14 @@ void int_node_print(void *data, ostream_p ostream)
 
 bool create_int_tree(const result_p rule_result, void* data, result_p result)
 {
-	int_data_p int_data = (int_data_p)rule_result->data;
+	int_data_p int_data = CAST(int_data_p, rule_result->data);
 	
 	int_node_p int_node = MALLOC(struct int_node_t);
 	init_tree_node(&int_node->_node, int_node_type, NULL);
 	tree_node_set_pos(&int_node->_node, &int_data->ps);
 	int_node->value = int_data->sign * int_data->value;
 	result_assign_ref_counted(result, int_node, int_node_print);
+	SET_TYPE("int_data_p", int_data);
 	return TRUE;
 }
 		
@@ -2681,12 +2917,16 @@ void int_grammar(non_terminal_dict_p *all_nt)
 					CHARSET(int_data_add_char) ADD_RANGE('1','9') SET_PS(int_set_pos) 
 					CHARSET(int_data_add_char) ADD_RANGE('0','9') SEQ(pass_to_sequence, use_sequence_result) OPT(0)
  			}
+			CHAR('U') OPT(0)
+			CHAR('L') OPT(0)
 			CHAR('L') OPT(0)
 			END_FUNCTION(create_int_tree)
 }
 
 void test_parse_int(non_terminal_dict_p *all_nt, const char *input, long long int value)
 {
+	ENTER_RESULT_CONTEXT
+
 	text_buffer_t text_buffer;
 	text_buffer_assign_string(&text_buffer, input);
 	
@@ -2728,6 +2968,8 @@ void test_parse_int(non_terminal_dict_p *all_nt, const char *input, long long in
 	DISP_RESULT(result);
 	
 	solutions_free(&solutions);
+
+	EXIT_RESULT_CONTEXT
 }
 
 void test_int_grammar(non_terminal_dict_p *all_nt)
@@ -2750,12 +2992,13 @@ bool equal_string(result_p result, const void *argument)
 	const char *keyword_name = (const char*)argument;
 	return    result->data != NULL
 		   && ((tree_node_p)result->data)->type_name == ident_type
-		   && strcmp(((ident_p)result->data)->name, keyword_name) == 0;
+		   && strcmp(CAST(ident_p, result->data)->name, keyword_name) == 0;
 }
 
 bool not_a_keyword(result_p result, const void *argument)
 {
-	return *keyword_state == 0;
+	ident_p ident = CAST(ident_p, result->data);
+	return !ident->is_keyword;
 }
 
 const char* list_type = "list";
@@ -2763,10 +3006,12 @@ const char* list_type = "list";
 bool add_seq_as_list(result_p prev, result_p seq, result_p result)
 {
 	prev_child_p new_prev_child = malloc_prev_child();
-	new_prev_child->prev = (prev_child_p)prev->data;
-	tree_p list = make_tree_with_children(list_type, (prev_child_p)seq->data);
+	new_prev_child->prev = CAST(prev_child_p, prev->data);
+	tree_p list = make_tree_with_children(list_type, CAST(prev_child_p, seq->data));
 	result_assign_ref_counted(&new_prev_child->child, list, tree_print);
+	SET_TYPE("tree_p", list);
 	result_assign_ref_counted(result, new_prev_child, NULL);
+	SET_TYPE("prev_child_p", new_prev_child);
 	return TRUE;
 }
 
@@ -2778,8 +3023,10 @@ bool add_seq_as_list(result_p prev, result_p seq, result_p result)
 #define KEYWORD(K) NTF("ident", 0) element->condition = equal_string; element->condition_argument = ident_string(K); *keyword_state = 1; WS
 #define OPTN OPT(0)
 #define IDENT NTF("ident", add_child) element->condition = not_a_keyword; WS
+#define IDENT_OPT NTF("ident", add_child) element->condition = not_a_keyword; OPTN WS
 #define SEQL SEQ(0, add_seq_as_list)
 #define REC_RULEC REC_RULE(rec_add_child);
+#define CHAR_WS(C) CHAR(C) WS
 
 void c_grammar(non_terminal_dict_p *all_nt)
 {
@@ -2790,88 +3037,104 @@ void c_grammar(non_terminal_dict_p *all_nt)
 	
 	NT_DEF("primary_expr")
 		RULE IDENT PASS
-		RULE NTP("int")
-		RULE NTP("double")
-		RULE NTP("char")
-		RULE NTP("string")
-		RULE CHAR('(') WS NTP("expr") CHAR(')') WS
+		RULE NTP("int") WS
+		RULE NTP("double") WS
+		RULE NTP("char") WS
+		RULE NTP("string") WS
+		RULE CHAR_WS('(') NTP("expr") CHAR_WS(')')
 
 	NT_DEF("postfix_expr")
 		RULE NTP("primary_expr")
-		REC_RULEC CHAR('[') WS NT("expr") CHAR(']') TREE("arrayexp")
-		REC_RULEC CHAR('(') WS NT("assignment_expr") SEQL { CHAIN CHAR(',') WS } OPTN CHAR(')') TREE("call")
-		REC_RULEC CHAR('.') WS IDENT TREE("field")
-		REC_RULEC CHAR('-') CHAR('>') WS IDENT TREE("fieldderef")
-		REC_RULEC CHAR('+') CHAR('+') WS TREE("post_inc")
-		REC_RULEC CHAR('-') CHAR('-') WS TREE("post_dec")
+		REC_RULEC CHAR_WS('[') NT("expr") CHAR_WS(']') TREE("arrayexp")
+		REC_RULEC CHAR_WS('(') NT("assignment_expr") SEQL { CHAIN CHAR_WS(',') } OPTN CHAR_WS(')') TREE("call")
+		REC_RULEC CHAR_WS('.') IDENT TREE("field")
+		REC_RULEC CHAR('-') CHAR_WS('>') IDENT TREE("fieldderef")
+		REC_RULEC CHAR('+') CHAR_WS('+') TREE("post_inc")
+		REC_RULEC CHAR('-') CHAR_WS('-') TREE("post_dec")
 
 	NT_DEF("unary_expr")
-		RULE CHAR('+') CHAR('+') WS NT("unary_expr") TREE("pre_inc")
-		RULE CHAR('-') CHAR('-') WS NT("unary_expr") TREE("pre_dec")
-		RULE CHAR('&') WS NT("cast_expr") TREE("address_of")
-		RULE CHAR('*') WS NT("cast_expr") TREE("deref")
-		RULE CHAR('+') WS NT("cast_expr") TREE("plus")
-		RULE CHAR('-') WS NT("cast_expr") TREE("min")
-		RULE CHAR('~') WS NT("cast_expr") TREE("invert")
-		RULE CHAR('!') WS NT("cast_expr") TREE("not")
+		RULE CHAR('+') CHAR_WS('+') NT("unary_expr") TREE("pre_inc")
+		RULE CHAR('-') CHAR_WS('-') NT("unary_expr") TREE("pre_dec")
+		RULE CHAR_WS('&') NT("cast_expr") TREE("address_of")
+		RULE CHAR_WS('*') NT("cast_expr") TREE("deref")
+		RULE CHAR_WS('+') NT("cast_expr") TREE("plus")
+		RULE CHAR_WS('-') NT("cast_expr") TREE("min")
+		RULE CHAR_WS('~') NT("cast_expr") TREE("invert")
+		RULE CHAR_WS('!') NT("cast_expr") TREE("not")
 		RULE KEYWORD("sizeof")
 		{ GROUPING
-			RULE NT("unary_expr") TREE("typeof")
-			RULE CHAR('(') WS IDENT CHAR(')') WS
-		} TREE("sizeof")
+			RULE CHAR_WS('(') NT("sizeof_type") CHAR_WS(')') TREE("sizeof")
+			RULE NT("unary_expr") TREE("sizeof_expr")
+		}
 		RULE NTP("postfix_expr")
 
+	NT_DEF("sizeof_type")
+		RULE KEYWORD("char") TREE("char")
+		RULE KEYWORD("short") TREE("short")
+		RULE KEYWORD("int") TREE("int")
+		RULE KEYWORD("long") TREE("long")
+		RULE KEYWORD("signed") NT("sizeof_type") TREE("signed")
+		RULE KEYWORD("unsigned") NT("sizeof_type") TREE("unsigned")
+		RULE KEYWORD("float") TREE("float")
+		RULE KEYWORD("double") NT("sizeof_type") OPTN TREE("double")
+		RULE KEYWORD("const") NT("sizeof_type") TREE("const")
+		RULE KEYWORD("volatile") NT("sizeof_type") TREE("volatile")
+		RULE KEYWORD("void") TREE("void")
+		RULE KEYWORD("struct") IDENT TREE("structdecl")
+		RULE IDENT
+		REC_RULEC WS CHAR_WS('*') TREE("pointdecl")
+
 	NT_DEF("cast_expr")
-		RULE CHAR('(') WS NT("abstract_declaration") CHAR(')') WS NT("cast_expr") TREE("cast")
+		RULE CHAR_WS('(') NT("abstract_declaration") CHAR_WS(')') NT("cast_expr") TREE("cast")
 		RULE NTP("unary_expr")
 
 	NT_DEF("l_expr1")
 		RULE NTP("cast_expr")
-		REC_RULEC WS CHAR('*') WS NT("cast_expr") TREE("times")
-		REC_RULEC WS CHAR('/') WS NT("cast_expr") TREE("div")
-		REC_RULEC WS CHAR('%') WS NT("cast_expr") TREE("mod")
+		REC_RULEC WS CHAR_WS('*') NT("cast_expr") TREE("times")
+		REC_RULEC WS CHAR_WS('/') NT("cast_expr") TREE("div")
+		REC_RULEC WS CHAR_WS('%') NT("cast_expr") TREE("mod")
 
 	NT_DEF("l_expr2")
 		RULE NTP("l_expr1")
-		REC_RULEC WS CHAR('+') WS NT("l_expr1") TREE("add")
-		REC_RULEC WS CHAR('-') WS NT("l_expr1") TREE("sub")
+		REC_RULEC WS CHAR_WS('+') NT("l_expr1") TREE("add")
+		REC_RULEC WS CHAR_WS('-') NT("l_expr1") TREE("sub")
 
 	NT_DEF("l_expr3")
 		RULE NTP("l_expr2")
-		REC_RULEC WS CHAR('<') CHAR('<') WS NT("l_expr2") TREE("ls")
-		REC_RULEC WS CHAR('>') CHAR('>') WS NT("l_expr2") TREE("rs")
+		REC_RULEC WS CHAR('<') CHAR_WS('<') NT("l_expr2") TREE("ls")
+		REC_RULEC WS CHAR('>') CHAR_WS('>') NT("l_expr2") TREE("rs")
 
 	NT_DEF("l_expr4")
 		RULE NTP("l_expr3")
-		REC_RULEC WS CHAR('<') CHAR('=') WS NT("l_expr3") TREE("le")
-		REC_RULEC WS CHAR('>') CHAR('=') WS NT("l_expr3") TREE("ge")
-		REC_RULEC WS CHAR('<') WS NT("l_expr3") TREE("lt")
-		REC_RULEC WS CHAR('>') WS NT("l_expr3") TREE("gt")
-		REC_RULEC WS CHAR('=') CHAR('=') WS NT("l_expr3") TREE("eq")
-		REC_RULEC WS CHAR('!') CHAR('=') WS NT("l_expr3") TREE("ne")
+		REC_RULEC WS CHAR('<') CHAR_WS('=') NT("l_expr3") TREE("le")
+		REC_RULEC WS CHAR('>') CHAR_WS('=') NT("l_expr3") TREE("ge")
+		REC_RULEC WS CHAR_WS('<') NT("l_expr3") TREE("lt")
+		REC_RULEC WS CHAR_WS('>') NT("l_expr3") TREE("gt")
+		REC_RULEC WS CHAR('=') CHAR_WS('=') NT("l_expr3") TREE("eq")
+		REC_RULEC WS CHAR('!') CHAR_WS('=') NT("l_expr3") TREE("ne")
 
 	NT_DEF("l_expr5")
 		RULE NTP("l_expr4")
-		REC_RULEC WS CHAR('^') WS NT("l_expr4") TREE("bexor")
+		REC_RULEC WS CHAR_WS('^') NT("l_expr4") TREE("bexor")
 
 	NT_DEF("l_expr6")
 		RULE NTP("l_expr5")
-		REC_RULEC WS CHAR('&') WS NT("l_expr5") TREE("land")
+		REC_RULEC WS CHAR_WS('&') NT("l_expr5") TREE("land")
 
 	NT_DEF("l_expr7")
 		RULE NTP("l_expr6")
-		REC_RULEC WS CHAR('|') WS NT("l_expr6") TREE("lor")
+		REC_RULEC WS CHAR_WS('|') NT("l_expr6") TREE("lor")
 
 	NT_DEF("l_expr8")
 		RULE NTP("l_expr7")
-		REC_RULEC WS CHAR('&') CHAR('&') WS NT("l_expr7") TREE("and")
+		REC_RULEC WS CHAR('&') CHAR_WS('&') NT("l_expr7") TREE("and")
 
 	NT_DEF("l_expr9")
 		RULE NTP("l_expr8")
-		REC_RULEC WS CHAR('|') CHAR('|') WS NT("l_expr8") TREE("or")
+		REC_RULEC WS CHAR('|') CHAR_WS('|') NT("l_expr8") TREE("or")
 
 	NT_DEF("conditional_expr")
-		RULE NT("l_expr9") WS CHAR('?') WS NT("l_expr9") WS CHAR(':') WS NT("conditional_expr") TREE("if_expr")
+		RULE NT("l_expr9") WS CHAR_WS('?') NT("l_expr9") WS CHAR_WS(':') NT("conditional_expr") TREE("if_expr")
 		RULE NTP("l_expr9")
 
 	NT_DEF("assignment_expr")
@@ -2879,20 +3142,20 @@ void c_grammar(non_terminal_dict_p *all_nt)
 		RULE NTP("conditional_expr")
 
 	NT_DEF("assignment_operator")
-		RULE CHAR('=') TREE("ass")
-		RULE CHAR('*') CHAR('=') WS TREE("times_ass")
-		RULE CHAR('/') CHAR('=') WS TREE("div_ass")
-		RULE CHAR('%') CHAR('=') WS TREE("mod_ass")
-		RULE CHAR('+') CHAR('=') WS TREE("add_ass")
-		RULE CHAR('-') CHAR('=') WS TREE("sub_ass")
-		RULE CHAR('<') CHAR('<') CHAR('=') WS TREE("sl_ass")
-		RULE CHAR('>') CHAR('>') CHAR('=') WS TREE("sr_ass")
-		RULE CHAR('&') CHAR('=') WS TREE("and_ass")
-		RULE CHAR('|') CHAR('=') WS TREE("or_ass")
-		RULE CHAR('^') CHAR('=') WS TREE("exor_ass")
+		RULE CHAR_WS('=') TREE("ass")
+		RULE CHAR('*') CHAR_WS('=') TREE("times_ass")
+		RULE CHAR('/') CHAR_WS('=') TREE("div_ass")
+		RULE CHAR('%') CHAR_WS('=') TREE("mod_ass")
+		RULE CHAR('+') CHAR_WS('=') TREE("add_ass")
+		RULE CHAR('-') CHAR_WS('=') TREE("sub_ass")
+		RULE CHAR('<') CHAR('<') CHAR_WS('=') TREE("sl_ass")
+		RULE CHAR('>') CHAR('>') CHAR_WS('=') TREE("sr_ass")
+		RULE CHAR('&') CHAR_WS('=') TREE("and_ass")
+		RULE CHAR('|') CHAR_WS('=') TREE("or_ass")
+		RULE CHAR('^') CHAR_WS('=') TREE("exor_ass")
 
 	NT_DEF("expr")
-		RULE NT("assignment_expr") SEQL { CHAIN CHAR(',') WS } PASS
+		RULE NT("assignment_expr") SEQL { CHAIN CHAR_WS(',') } PASS
 
 	NT_DEF("constant_expr")
 		RULE NT("conditional_expr") PASS
@@ -2904,24 +3167,30 @@ void c_grammar(non_terminal_dict_p *all_nt)
 			RULE NT("type_specifier")
 		} SEQL OPTN AVOID
 		{ GROUPING
+			RULE NT("func_declarator") CHAR_WS('(')
+			{ GROUPING
+				RULE NT("parameter_declaration_list") OPTN
+				RULE KEYWORD("void") TREE("void")
+			}
+			CHAR_WS(')')
+			{ GROUPING
+				RULE CHAR_WS(';')
+				RULE CHAR_WS('{') NT("decl_or_stat") CHAR_WS('}')
+			} TREE("new_style") WS
+			RULE NT("func_declarator") CHAR_WS('(') NT("ident_list") OPTN CHAR_WS(')') NT("declaration") SEQL OPTN CHAR_WS('{') NT("decl_or_stat") CHAR_WS('}') TREE("old_style")
 			RULE
 			{ GROUPING
 				RULE NT("declarator")
 				{ GROUPING
-					RULE WS CHAR('=') WS NT("initializer")
+					RULE WS CHAR_WS('=') NT("initializer")
 				} OPTN
-			} SEQL { CHAIN CHAR(',') WS } OPTN CHAR(';') TREE("decl")
-			RULE NT("func_declarator") CHAR('(') NT("parameter_declaration_list") OPTN CHAR(')')
-			{ GROUPING
-				RULE CHAR(';')
-				RULE CHAR('{') NT("decl_or_stat") CHAR('}')
-			} TREE("new_style")
-			RULE NT("func_declarator") CHAR('(') NT("ident_list") OPTN CHAR(')') NT("declaration") SEQL OPTN CHAR('{') NT("decl_or_stat") CHAR('}') TREE("old_style")
+			} SEQL { CHAIN CHAR_WS(',') } OPTN CHAR_WS(';') TREE("decl")
 		}
 
 	NT_DEF("storage_class_specifier")
 		RULE KEYWORD("typedef") TREE("typedef")
 		RULE KEYWORD("extern") TREE("extern")
+		RULE KEYWORD("inline") TREE("inline")
 		RULE KEYWORD("static") TREE("static")
 		RULE KEYWORD("auto") TREE("auto")
 		RULE KEYWORD("register") TREE("register")
@@ -2943,71 +3212,75 @@ void c_grammar(non_terminal_dict_p *all_nt)
 		RULE IDENT
 
 	NT_DEF("struct_or_union_specifier")
-		RULE KEYWORD("struct") IDENT CHAR('{')
+		RULE KEYWORD("struct") IDENT CHAR_WS('{')
 		{ GROUPING
-			RULE NT("struct_declaration")
-		} SEQL CHAR('}') TREE("struct_d")
-		RULE KEYWORD("struct") CHAR('{')
+			RULE NT("struct_declaration_or_anon")
+		} SEQL CHAR_WS('}') TREE("struct_d")
+		RULE KEYWORD("struct") CHAR_WS('{')
 		{ GROUPING
-			RULE NT("struct_declaration")
-		} SEQL CHAR('}') TREE("struct_n")
+			RULE NT("struct_declaration_or_anon")
+		} SEQL CHAR_WS('}') TREE("struct_n")
 		RULE KEYWORD("struct") IDENT TREE("struct")
-		RULE KEYWORD("union") IDENT CHAR('{')
+		RULE KEYWORD("union") IDENT CHAR_WS('{')
 		{ GROUPING
-			RULE NT("struct_declaration")
-		} SEQL CHAR('}') TREE("union_d")
-		RULE KEYWORD("union") CHAR('{')
+			RULE NT("struct_declaration_or_anon")
+		} SEQL CHAR_WS('}') TREE("union_d")
+		RULE KEYWORD("union") CHAR_WS('{')
 		{ GROUPING
-			RULE NT("struct_declaration")
-		} SEQL CHAR('}') TREE("union_n")
+			RULE NT("struct_declaration_or_anon")
+		} SEQL CHAR_WS('}') TREE("union_n")
 		RULE KEYWORD("union") IDENT TREE("union")
+
+	NT_DEF("struct_declaration_or_anon")
+		RULE NT("struct_or_union_specifier") CHAR_WS(';')
+		RULE NT("struct_declaration")
 
 	NT_DEF("struct_declaration")
 		RULE NT("type_specifier") NT("struct_declaration") TREE("type")
-		RULE NT("struct_declarator") SEQL { CHAIN CHAR(',') WS } CHAR(';') TREE("strdec")
+		RULE NT("struct_declarator") SEQL { CHAIN CHAR_WS(',') } CHAR_WS(';') TREE("strdec")
 
 	NT_DEF("struct_declarator")
 		RULE NT("declarator")
 		{ GROUPING
-			RULE CHAR(':') NT("constant_expr")
+			RULE CHAR_WS(':') NT("constant_expr")
 		} OPTN TREE("record_field")
 
 	NT_DEF("enum_specifier")
-		RULE KEYWORD("enum") IDENT
+		RULE KEYWORD("enum") IDENT_OPT
 		{ GROUPING
-			RULE CHAR('{') NT("enumerator") SEQL { CHAIN CHAR(',') WS } CHAR('}')
+			RULE CHAR_WS('{') NT("enumerator") SEQL { CHAIN CHAR_WS(',') } CHAR_WS('}')
 		} TREE("enum")
 
 	NT_DEF("enumerator")
 		RULE IDENT
 		{ GROUPING
-			RULE CHAR('=') NT("constant_expr")
+			RULE CHAR_WS('=') NT("constant_expr")
 		} OPTN TREE("enumerator")
 
 	NT_DEF("func_declarator")
-		RULE CHAR('*')
+		RULE CHAR_WS('*')
 		{ GROUPING
 			RULE KEYWORD("const") TREE("const")
 		} OPTN NT("func_declarator") TREE("pointdecl")
-		RULE KEYWORD("(") NT("func_declarator") CHAR(')')
+		RULE CHAR_WS('(') NT("func_declarator") CHAR_WS(')')
 		RULE IDENT
 
 	NT_DEF("declarator")
-		RULE CHAR('*')
+		RULE CHAR_WS('*')
 		{ GROUPING
 			RULE KEYWORD("const") TREE("const")
 		} OPTN NT("declarator") TREE("pointdecl")
-		RULE CHAR('(') NT("declarator") CHAR(')') TREE("brackets")
+		RULE CHAR_WS('(') NT("declarator") CHAR_WS(')') TREE("brackets")
 		RULE WS IDENT
-		REC_RULEC CHAR('[') NT("constant_expr") OPTN CHAR(']') TREE("array")
-		REC_RULEC CHAR('(') NT("abstract_declaration_list") OPTN CHAR(')') TREE("function")
+		REC_RULEC CHAR_WS('[') NT("constant_expr") OPTN CHAR_WS(']') TREE("array")
+		REC_RULEC CHAR_WS('(') NT("abstract_declaration_list") OPTN CHAR_WS(')') TREE("function")
 
 	NT_DEF("abstract_declaration_list")
 		RULE NT("abstract_declaration")
 		{ GROUPING
-			RULE CHAR(',')
+			RULE CHAR_WS(',')
 			{ GROUPING
-				RULE CHAR('.') CHAR('.') CHAR('.') TREE("varargs")
+				RULE CHAR('.') CHAR('.') CHAR_WS('.') TREE("varargs")
 				RULE NT("abstract_declaration_list")
 			}
 		} OPTN
@@ -3015,9 +3288,9 @@ void c_grammar(non_terminal_dict_p *all_nt)
 	NT_DEF("parameter_declaration_list")
 		RULE NT("parameter_declaration")
 		{ GROUPING
-			RULE CHAR(',')
+			RULE CHAR_WS(',')
 			{ GROUPING
-				RULE CHAR('.') CHAR('.') CHAR('.') TREE("varargs")
+				RULE CHAR('.') CHAR('.') CHAR_WS('.') TREE("varargs")
 				RULE NT("parameter_declaration_list")
 			}
 		} OPTN
@@ -3025,9 +3298,9 @@ void c_grammar(non_terminal_dict_p *all_nt)
 	NT_DEF("ident_list")
 		RULE IDENT
 		{ GROUPING
-			RULE CHAR(',')
+			RULE CHAR_WS(',')
 			{ GROUPING
-				RULE CHAR('.') CHAR('.') CHAR('.') TREE("varargs")
+				RULE CHAR('.') CHAR('.') CHAR_WS('.') TREE("varargs")
 				RULE NT("ident_list")
 			}
 		} OPTN
@@ -3042,18 +3315,18 @@ void c_grammar(non_terminal_dict_p *all_nt)
 		RULE NT("abstract_declarator")
 
 	NT_DEF("abstract_declarator")
-		RULE CHAR('*')
+		RULE CHAR_WS('*')
 		{ GROUPING
 			RULE KEYWORD("const") TREE("const")
 		} OPTN NT("abstract_declarator") TREE("abs_pointdecl")
-		RULE CHAR('(') NT("abstract_declarator") CHAR(')') TREE("abs_brackets")
+		RULE CHAR_WS('(') NT("abstract_declarator") CHAR_WS(')') TREE("abs_brackets")
 		RULE
-		REC_RULEC CHAR('[') NT("constant_expr") OPTN CHAR(']') TREE("abs_array")
-		REC_RULEC CHAR('(') NT("parameter_declaration_list") CHAR(')') TREE("abs_func")
+		REC_RULEC CHAR_WS('[') NT("constant_expr") OPTN CHAR_WS(']') TREE("abs_array")
+		REC_RULEC CHAR_WS('(') NT("parameter_declaration_list") CHAR_WS(')') TREE("abs_func")
 
 	NT_DEF("initializer")
 		RULE NT("assignment_expr")
-		RULE CHAR('{') NT("initializer") SEQL { CHAIN CHAR(',') WS } CHAR(',') OPTN CHAR('}') TREE("initializer")
+		RULE CHAR_WS('{') NT("initializer") SEQL { CHAIN CHAR_WS(',') } CHAR(',') OPTN WS CHAR_WS('}') TREE("initializer")
 
 	NT_DEF("decl_or_stat")
 		RULE NT("declaration") SEQL OPTN NT("statement") SEQL OPTN
@@ -3066,34 +3339,35 @@ void c_grammar(non_terminal_dict_p *all_nt)
 				RULE IDENT
 				RULE KEYWORD("case") NT("constant_expr")
 				RULE KEYWORD("default")
-			} CHAR(':') NT("statement") TREE("label")
-			RULE CHAR('{') NT("decl_or_stat") CHAR('}') TREE("brackets")
+			} CHAR_WS(':') NT("statement") TREE("label")
+			RULE CHAR_WS('{') NT("decl_or_stat") CHAR_WS('}') TREE("brackets")
 		}
 		RULE
 		{ GROUPING
-			RULE NT("expr") OPTN CHAR(';')
-			RULE KEYWORD("if") WS CHAR('(') NT("expr") CHAR(')') NT("statement")
+			RULE NT("expr") OPTN CHAR_WS(';')
+			RULE KEYWORD("if") WS CHAR_WS('(') NT("expr") CHAR_WS(')') NT("statement")
 			{ GROUPING
 				RULE KEYWORD("else") NT("statement")
 			} OPTN TREE("if")
-			RULE KEYWORD("switch") WS CHAR('(') NT("expr") CHAR(')') NT("statement") TREE("switch")
-			RULE KEYWORD("while") WS CHAR('(') NT("expr") CHAR(')') NT("statement") TREE("while")
-			RULE KEYWORD("do") NT("statement") KEYWORD("while") WS CHAR('(') NT("expr") CHAR(')') CHAR(';') TREE("do")
-			RULE KEYWORD("for") WS CHAR('(') NT("expr") OPTN CHAR(';')
+			RULE KEYWORD("switch") WS CHAR_WS('(') NT("expr") CHAR_WS(')') NT("statement") TREE("switch")
+			RULE KEYWORD("while") WS CHAR_WS('(') NT("expr") CHAR_WS(')') NT("statement") TREE("while")
+			RULE KEYWORD("do") NT("statement") KEYWORD("while") WS CHAR_WS('(') NT("expr") CHAR_WS(')') CHAR_WS(';') TREE("do")
+			RULE KEYWORD("for") WS CHAR_WS('(') NT("expr") OPTN CHAR_WS(';')
 			{ GROUPING
 				RULE WS NT("expr")
-			} OPTN CHAR(';')
+			} OPTN CHAR_WS(';')
 			{ GROUPING
 				RULE WS NT("expr")
-			} OPTN CHAR(')') NT("statement") TREE("for")
-			RULE KEYWORD("goto") IDENT CHAR(';') TREE("goto")
-			RULE KEYWORD("continue") CHAR(';') TREE("cont")
-			RULE KEYWORD("break") CHAR(';') TREE("break")
-			RULE KEYWORD("return") NT("expr") OPTN CHAR(';') TREE("ret")
+			} OPTN CHAR_WS(')') NT("statement") TREE("for")
+			RULE KEYWORD("goto") IDENT CHAR_WS(';') TREE("goto")
+			RULE KEYWORD("continue") CHAR_WS(';') TREE("cont")
+			RULE KEYWORD("break") CHAR_WS(';') TREE("break")
+			RULE KEYWORD("return") NT("expr") OPTN CHAR_WS(';') TREE("ret")
 		}
 
 	NT_DEF("root")
 		RULE
+		WS
 		{ GROUPING
 			RULE NT("declaration")
 		} SEQL OPTN END
@@ -3138,6 +3412,8 @@ void fixed_string_ostream_finish(fixed_string_ostream_p ostream)
 
 void test_parse_grammar(non_terminal_dict_p *all_nt, const char *nt, const char *input, const char *exp_output)
 {
+	ENTER_RESULT_CONTEXT
+
 	text_buffer_t text_buffer;
 	text_buffer_assign_string(&text_buffer, input);
 	
@@ -3177,6 +3453,8 @@ void test_parse_grammar(non_terminal_dict_p *all_nt, const char *nt, const char 
 	DISP_RESULT(result);
 	
 	solutions_free(&solutions);
+
+	EXIT_RESULT_CONTEXT
 }
 
 void test_c_grammar(non_terminal_dict_p *all_nt)
@@ -3209,6 +3487,116 @@ void file_ostream_init(file_ostream_p ostream, FILE *f)
 	ostream->f = f;
 }
 
+/*
+	Expect
+*/
+
+#define MAX_EXP_SYM 200
+
+struct nt_stack
+{
+	const char *name;
+	unsigned long int ref_count;
+	text_pos_t pos;
+	nt_stack_p parent;
+};
+nt_stack_p nt_stack_allocated = NULL;
+
+nt_stack_p nt_stack_push(const char *name, parser_p parser)
+{
+	nt_stack_p child;
+	if (nt_stack_allocated != NULL)
+	{
+		child = nt_stack_allocated;
+		nt_stack_allocated = child->parent;
+	}
+	else
+		child = MALLOC(struct nt_stack);
+	child->name = name;
+	child->ref_count = 1;
+	child->pos = parser->text_buffer->pos;
+	child->parent = parser->nt_stack;
+	if (parser->nt_stack != 0)
+		parser->nt_stack->ref_count++;
+	//DEBUG_TAB; DEBUG_P1("push %s\n", child->name);
+	return child;
+}
+
+void nt_stack_dispose(nt_stack_p nt_stack)
+{
+	while (nt_stack != NULL && --nt_stack->ref_count == 0)
+	{
+		nt_stack_p parent = nt_stack->parent;
+		nt_stack->parent = nt_stack_allocated;
+		nt_stack_allocated = nt_stack;
+		nt_stack = parent;
+	}
+}
+
+nt_stack_p nt_stack_pop(nt_stack_p cur)
+{
+	//DEBUG_TAB; DEBUG_P1("pop %s\n", cur == NULL ? "<NULL>" : cur->name);
+	nt_stack_p parent = cur->parent;
+	nt_stack_dispose(cur);
+	return parent;
+}
+
+text_pos_t highest_pos;
+typedef struct
+{
+	nt_stack_p nt_stack;
+	element_p element;
+} expect_t;
+expect_t expected[MAX_EXP_SYM];
+int nr_expected;
+
+void init_expected()
+{
+	highest_pos.pos = 0;
+	nr_expected = 0;
+}
+
+void expect_element(parser_p parser, element_p element)
+{
+	if (parser->text_buffer->pos.pos < highest_pos.pos) return;
+	
+	if (parser->text_buffer->pos.pos > highest_pos.pos)
+	{
+		highest_pos = parser->text_buffer->pos;
+		//for (int i = 0; i < nr_expected; i++)
+		//	nt_stack_dispose(expected[i].nt_stack);
+		nr_expected = 0;
+	}
+	for (int i = 0; i < nr_expected; i++)
+		if (expected[i].nt_stack == parser->nt_stack && expected[i].element == element)
+			return;
+	if (nr_expected < MAX_EXP_SYM)
+	{
+		parser->nt_stack->ref_count++;
+		expected[nr_expected].nt_stack = parser->nt_stack;
+		expected[nr_expected].element = element;
+		nr_expected++;
+	}
+}
+
+
+
+void print_expected(FILE *fout)
+{
+	fprintf(fout, "Expect at %d.%d:\n", highest_pos.cur_line, highest_pos.cur_column);
+	for (int i = 0; i < nr_expected; i++)
+	{
+		element_p element = expected[i].element;
+		fprintf(fout, "- expect ");
+		element_print(fout, element);
+		fprintf(fout, "\n");
+		for (nt_stack_p nt_stack = expected[i].nt_stack; nt_stack != NULL; nt_stack = nt_stack->parent)
+			fprintf(fout, "  in %s at %d.%d\n", nt_stack->name, nt_stack->pos.cur_line, nt_stack->pos.cur_column);
+	}
+}
+
+
+#ifndef INCLUDED
 
 int main(int argc, char *argv[])
 {
@@ -3242,82 +3630,5 @@ int main(int argc, char *argv[])
 
 	return 0;
 }
-
-
-
-
-
-#if 0
-
-
-/*
-	Error reporting
-	~~~~~~~~~~~~~~~
-	In case the input cannot be parsed, the parser produces
-	a list of all expected terminal symbols together with
-	the grammar rule they occured in, at the position the 
-	parser could not continue.
-	The following section implements this list.
-*/
-
-#define MAX_EXP_SYM 200
-typedef struct {
-  char *in_nt;
-  element_p elements;
-} expect_t;
-expect_t expect[MAX_EXP_SYM];
-char *exp_in_nt[MAX_EXP_SYM];
-
-static void expected_string(char *s, char *is_keyword)
-{
-	if (file_pos < f_file_pos)
-		return;
-	if (file_pos > f_file_pos)
-	{   nr_exp_syms = 0;
-		f_file_pos = file_pos;
-		f_line = cur_line;
-		f_column = cur_column;
-	}
-
-	if (nr_exp_syms >= MAX_EXP_SYM)
-		return;
-
-	expect[nr_exp_syms].sym = s;
-	expect[nr_exp_syms].in_nt = current_nt;
-	expect[nr_exp_syms].elements = current_rule;
-	expect[nr_exp_syms].is_keyword = is_keyword;
-	nr_exp_syms++;
-}
-
-void print_last_pos()
-{   int i;
-
-	printf("%d.%d Expected:\n", f_line, f_column);
-	for (i = 0; i < nr_exp_syms; i++)
-	{   bool unique = TRUE;
-		int j;
-		for (j = 0; unique && j < i; j++)
-			if (expect[i].elements == expect[j].elements)
-				unique = FALSE;
-		if (unique)
-		{
-			printf("	");
-			if (expect[i].elements)
-				print_rule(stdout, expect[i].elements);
-			else
-				printf("%s ", expect[i].sym);
-			printf(":");
-			if (expect[i].in_nt)
-				printf(" in %s", expect[i].in_nt);
-			if (expect[i].is_keyword != NULL)
-				printf(" ('%s' is a keyword)", expect[i].is_keyword);
-			printf("\n");
-		}
-	}
-}
-
-
-
-
 
 #endif
