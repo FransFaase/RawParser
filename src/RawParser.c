@@ -135,7 +135,7 @@ void my_free(void *p, unsigned int line)
 /*  Forward declarations of types of the grammar definition.  */
 
 typedef struct non_terminal non_terminal_t, *non_terminal_p;
-typedef struct rules *rules_p;
+typedef struct rule *rule_p;
 typedef struct element *element_p;
 typedef struct char_set *char_set_p;
 typedef struct result result_t, *result_p;
@@ -146,8 +146,8 @@ typedef struct text_pos text_pos_t, *text_pos_p;
 struct non_terminal
 {
 	const char *name;     /* Name of the non-terminal */
-	rules_p normal;       /* Normal rules */
-	rules_p recursive;    /* Left-recursive rules */
+	rule_p normal;       /* Normal rules */
+	rule_p recursive;    /* Left-recursive rules */
 };
 
 typedef struct non_terminal_dict *non_terminal_dict_p;
@@ -178,7 +178,7 @@ non_terminal_p find_nt(const char *name, non_terminal_dict_p *p_nt)
 
 typedef bool (*end_function_p)(const result_p rule_result, void* data, result_p result);
 
-struct rules
+struct rule
 {
 	element_p elements;            /* The rule definition */
 
@@ -200,14 +200,14 @@ struct rules
 	*/
 	bool (*rec_start_function)(result_p rec_result, result_p result);
 
-	rules_p next;           /* Next rule */
+	rule_p next;           /* Next rule */
 };
 
 /*  - Function to create a new rule */
 
-rules_p new_rule()
+rule_p new_rule()
 {
-	rules_p rule = MALLOC(struct rules);
+	rule_p rule = MALLOC(struct rule);
 	rule->elements = NULL;
 	rule->end_function = NULL;
 	rule->end_function_data = NULL;
@@ -240,7 +240,7 @@ struct element
 	element_p chain_rule;       /* Chain rule, for between the sequential elements */
 	union 
 	{   non_terminal_p non_terminal; /* rk_nt: Pointer to non-terminal */
-		rules_p rules;               /* rk_grouping: Pointer to the rules */
+		rule_p rules;                /* rk_grouping: Pointer to the rules */
 		char ch;                     /* rk_char: The character */
 		char_set_p char_set;         /* rk_charset: Pointer to character set definition */
 		const char *(*terminal_function)(const char *input, result_p result);
@@ -391,7 +391,7 @@ void char_set_add_range(char_set_p char_set, char first, char last)
 
 void element_print(FILE *f, element_p element);
 
-void rules_print(FILE *f, rules_p rule)
+void rules_print(FILE *f, rule_p rule)
 {
 	bool first = TRUE;
 
@@ -504,7 +504,7 @@ void element_print(FILE *f, element_p element)
 
 /*  Some macro definitions for defining a grammar more easily.  */
 
-#define HEADER(N) non_terminal_dict_p *_nt = N; non_terminal_p nt; rules_p* ref_rule; rules_p* ref_rec_rule; rules_p rules; element_p* ref_element; element_p element;
+#define HEADER(N) non_terminal_dict_p *_nt = N; non_terminal_p nt; rule_p* ref_rule; rule_p* ref_rec_rule; rule_p rules; element_p* ref_element; element_p element;
 #define NT_DEF(N) nt = find_nt(N, _nt); ref_rule = &nt->normal; ref_rec_rule = &nt->recursive;
 #define RULE rules = *ref_rule = new_rule(); ref_rule = &rules->next; ref_element = &rules->elements;
 #define REC_RULE(E) rules = *ref_rec_rule = new_rule(); rules->rec_start_function = E; ref_rec_rule = &rules->next; ref_element = &rules->elements;
@@ -524,7 +524,7 @@ void element_print(FILE *f, element_p element)
 #define REMOVE_CHAR(C) char_set_remove_char(element->info.char_set, C);
 #define ADD_RANGE(F,T) char_set_add_range(element->info.char_set, F, T);
 #define END_FUNCTION(F) rules->end_function = F;
-#define GROUPING _NEW_GR(rk_grouping) element->info.rules = new_rule(); rules_p* ref_rule = &element->info.rules; rules_p rules; element_p* ref_element; element_p element;
+#define GROUPING _NEW_GR(rk_grouping) element->info.rules = new_rule(); rule_p* ref_rule = &element->info.rules; rule_p rules; element_p* ref_element; element_p element;
 		
 
 
@@ -547,16 +547,17 @@ void white_space_grammar(non_terminal_dict_p *all_nt)
 		RULE
 			{ GROUPING
 				RULE /* for the usual white space characters */
-					CHARSET(0) ADD_CHAR(' ') ADD_CHAR('\t') ADD_CHAR('\n')
+					CHARSET(0) ADD_CHAR(' ') ADD_CHAR('\t') ADD_CHAR('\n') ADD_CHAR('\r')
 				RULE /* for the single line comment starting with two slashes */
 					CHAR('/')
 					CHAR('/')
 					CHARSET(0) ADD_RANGE(' ', 255) ADD_CHAR('\t') SEQ(0, 0) OPT(0)
+					CHAR('\r') OPT(0)
 					CHAR('\n')
 				RULE /* for the traditional C-comment (using avoid modifier) */
 					CHAR('/')
 					CHAR('*')
-					CHARSET(0) ADD_RANGE(' ', 255) ADD_CHAR('\t') ADD_CHAR('\n') SEQ(0, 0) OPT(0) AVOID
+					CHARSET(0) ADD_RANGE(' ', 255) ADD_CHAR('\t') ADD_CHAR('\n') ADD_CHAR('\r') SEQ(0, 0) OPT(0) AVOID
 					CHAR('*')
 					CHAR('/')
 			} SEQ(0, 0) OPT(0)
@@ -977,6 +978,23 @@ void text_buffer_assign_string(text_buffer_p text_buffer, const char* text)
 	text_buffer->pos.cur_column = 1;
 }
 
+void text_buffer_from_file(text_buffer_p text_buffer, FILE *f)
+{
+	fseek(f, 0L, SEEK_END);
+	size_t length = ftell(f);
+	char *buffer = MALLOC_N(length, char);
+	fseek(f, 0L, SEEK_SET);
+	length = fread(buffer, 1, length, f);
+	
+	text_buffer->tab_size = 4;
+	text_buffer->buffer_len = length;
+	text_buffer->buffer = buffer;
+	text_buffer->info = text_buffer->buffer;
+	text_buffer->pos.pos = 0;
+	text_buffer->pos.cur_line = 1;
+	text_buffer->pos.cur_column = 1;
+}
+
 void text_buffer_next(text_buffer_p text_buffer)
 {
 	if (text_buffer->pos.pos < text_buffer->buffer_len)
@@ -1094,7 +1112,7 @@ nt_stack_p nt_stack_pop(nt_stack_p cur);
 	
 */
 
-bool parse_rule(parser_p parser, element_p element, const result_p prev_result, rules_p rules, result_p rule_result);
+bool parse_rule(parser_p parser, element_p element, const result_p prev_result, rule_p rules, result_p rule_result);
 
 bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 {
@@ -1139,7 +1157,7 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 
 	/* Try the normal rules in order of declaration */
 	bool parsed_a_rule = FALSE;
-	for (rules_p rule = non_term->normal; rule != NULL; rule = rule->next )
+	for (rule_p rule = non_term->normal; rule != NULL; rule = rule->next )
 	{
 		DECL_RESULT(start)
 		if (parse_rule(parser, rule->elements, &start, rule, result))
@@ -1172,7 +1190,7 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 	while (parsed_a_rule)
 	{
 		parsed_a_rule = FALSE;
-		for (rules_p rule = non_term->recursive; rule != NULL; rule = rule->next)
+		for (rule_p rule = non_term->recursive; rule != NULL; rule = rule->next)
 		{
 			DECL_RESULT(start_result)
 			if (rule->rec_start_function != NULL)
@@ -1233,9 +1251,9 @@ bool parse_nt(parser_p parser, non_terminal_p non_term, result_p result)
 */
 
 bool parse_element(parser_p parser, element_p element, const result_p prev_result, result_p result);
-bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, rules_p rule, result_p result);
+bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, rule_p rule, result_p result);
 
-bool parse_rule(parser_p parser, element_p element, const result_p prev_result, rules_p rule, result_p rule_result)
+bool parse_rule(parser_p parser, element_p element, const result_p prev_result, rule_p rule, result_p rule_result)
 {
 	ENTER_RESULT_CONTEXT
 	DEBUG_ENTER_P2("parse_rule at %d.%d: ", parser->text_buffer->pos.cur_line, parser->text_buffer->pos.cur_column);
@@ -1478,7 +1496,7 @@ bool parse_rule(parser_p parser, element_p element, const result_p prev_result, 
 	return FALSE;
 }
 
-bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, rules_p rule, result_p rule_result)
+bool parse_seq(parser_p parser, element_p element, const result_p prev_seq, const result_p prev, rule_p rule, result_p rule_result)
 {
 	ENTER_RESULT_CONTEXT
 	/* In case of the avoid modifier, first an attempt is made to parse the
@@ -1622,7 +1640,7 @@ bool parse_element(parser_p parser, element_p element, const result_p prev_resul
 			{
 				/* Try all rules in the grouping */
 				DECL_RESULT(rule_result);
-				rules_p rule = element->info.rules;
+				rule_p rule = element->info.rules;
 				for ( ; rule != NULL; rule = rule->next )
 				{
 					DECL_RESULT(start);
@@ -3201,8 +3219,8 @@ void c_grammar(non_terminal_dict_p *all_nt)
 	NT_DEF("declaration")
 		RULE
 		{ GROUPING
-			RULE NT("storage_class_specifier")
-			RULE NT("type_specifier")
+			RULE NT("storage_class_specifier") PASS
+			RULE NT("type_specifier") PASS
 		} SEQL OPTN ADD_CHILD AVOID
 		{ GROUPING
 			RULE NT("func_declarator") CHAR_WS('(')
